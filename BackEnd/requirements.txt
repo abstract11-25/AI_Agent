@@ -1,0 +1,14 @@
+# 核心Web框架
+fastapi==0.104.1
+uvicorn==0.24.0
+
+# 智能体评估核心依赖（语义相似度计算）
+sentence-transformers==2.2.2  # 固定版本，避免自动升级导致冲突
+torch==2.1.0  # 与sentence-transformers兼容的稳定版
+
+# 处理HuggingFace相关依赖（关键冲突点）
+transformers==4.36.2  # 固定版本，兼容huggingface-hub 0.19.3
+huggingface-hub==0.19.3  # 与transformers 4.36.2严格兼容
+
+# 网络请求库（需与其他库兼容）
+requests==2.32.2  # 满足datasets等库的版本要求
