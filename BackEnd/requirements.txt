@@ -1,10 +1,12 @@
 # 核心Web框架
 fastapi==0.104.1
 uvicorn==0.24.0
+pydantic==2.5.0  # 确保与FastAPI 0.104.1兼容
 
 # 智能体评估核心依赖（语义相似度计算）
 sentence-transformers==2.2.2  # 固定版本，避免自动升级导致冲突
 torch==2.1.0  # 与sentence-transformers兼容的稳定版
+numpy<2.0.0  # 限制NumPy版本，避免与torch 2.1.0不兼容
 
 # 处理HuggingFace相关依赖（关键冲突点）
 transformers==4.36.2  # 固定版本，兼容huggingface-hub 0.19.3
@@ -12,3 +14,11 @@ huggingface-hub==0.19.3  # 与transformers 4.36.2严格兼容
 
 # 网络请求库（需与其他库兼容）
 requests==2.32.2  # 满足datasets等库的版本要求
+
+# 用户认证相关依赖
+python-jose[cryptography]==3.3.0  # JWT token生成和验证
+passlib[bcrypt]==1.7.4  # 密码加密
+bcrypt==4.0.1  # 固定bcrypt版本，与passlib 1.7.4兼容
+python-multipart==0.0.6  # 表单数据处理
+sqlalchemy==2.0.23  # ORM数据库框架
+email-validator==2.1.0  # 邮箱验证（EmailStr需要）

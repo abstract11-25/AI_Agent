@@ -4,6 +4,7 @@ import time
 import requests
 from typing import List, Dict, Any
 from sentence_transformers import SentenceTransformer, util
+from requests.exceptions import Timeout, RequestException
 
 # 评估样本类
 class Sample:
@@ -38,29 +39,44 @@ class ZhipuAgent:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-        self.model = "glm-4.5-flash"  # 免费模型
+        self.model = "glm-4.5-flash"
+        self.timeout = 60  # 超时时间（秒）- 增加到60秒，适应慢速响应
+        self.max_retries = 2  # 重试次数
 
     def generate_response(self, prompt: str) -> str:
-        try:
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}"
-            }
-            data = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-                "max_tokens": 512
-            }
-            response = requests.post(self.url, json=data, headers=headers, timeout=30)
-            response_data = response.json()
-            if "choices" in response_data and len(response_data["choices"]) > 0:
-                return response_data["choices"][0]["message"]["content"]
-            else:
-                return f"API响应错误: {str(response_data)}"
-        except Exception as e:
-            return f"调用API时出错: {str(e)}"
-
+        for retry in range(self.max_retries + 1):
+            try:
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}"
+                }
+                data = {
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 512
+                }
+                # 添加超时参数
+                response = requests.post(
+                    self.url,
+                    json=data,
+                    headers=headers,
+                    timeout=self.timeout  # 关键：设置超时
+                )
+                response.raise_for_status()  # 抛出HTTP错误（如401密钥无效）
+                response_data = response.json()
+                if "choices" in response_data and len(response_data["choices"]) > 0:
+                    return response_data["choices"][0]["message"]["content"]
+                else:
+                    return f"API响应异常: 无返回结果（重试{retry}/{self.max_retries}）"
+            except Timeout:
+                if retry < self.max_retries:
+                    time.sleep(1)  # 重试前等待1秒
+                    continue
+                return f"API调用超时（已重试{self.max_retries}次）"
+            except RequestException as e:
+                return f"API请求失败: {str(e)}"
+        return "未知错误"
 # 智能体评估器
 class AgentEvaluator:
     def __init__(self, agent, test_cases_path: str = "test_cases.json"):
