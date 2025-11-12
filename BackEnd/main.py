@@ -1,18 +1,32 @@
-import time
+from __future__ import annotations
+
 import asyncio
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, status
+import time
+from datetime import timedelta
+from typing import Any, Dict, List, Optional, Tuple
+
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel, EmailStr
-from typing import List, Dict, Optional, Tuple
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
-from AI_Agent import ZhipuAgent, AgentEvaluator, Sample  # 导入核心类
-from database import init_db, get_db, User
-from auth import (
-    verify_password, get_password_hash, create_access_token,
-    get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
+
+from AI_Agent import (
+    AgentFactory,
+    AgentEvaluator,
+    AgentSettings,
+    FactualityEvaluator,
+    FeatureMetricsCalculator,
+    Sample,
 )
-from datetime import timedelta
+from auth import (
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    create_access_token,
+    get_current_user,
+    get_password_hash,
+    verify_password,
+)
+from database import User, get_db, init_db
 
 app = FastAPI()
 
@@ -35,10 +49,34 @@ evaluation_tasks: Dict[str, Tuple[Dict, asyncio.Event]] = {}
 
 # 前端请求数据模型
 class EvaluationRequest(BaseModel):
-    api_key: str
+    api_key: Optional[str] = None
+    provider: str = "zhipu"
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    timeout: Optional[int] = None
+    max_retries: Optional[int] = None
+    extra_headers: Dict[str, str] = Field(default_factory=dict)
+    extra_body: Dict[str, Any] = Field(default_factory=dict)
+    agent: Optional[AgentSettings] = None
+    feature_config: Optional["FeatureConfig"] = None
     test_case_source: str = "default"
-    custom_test_cases: Optional[List[Dict]] = None
-    evaluation_types: List[str] = ["functional", "safety"]
+    custom_test_cases: Optional[List[Dict[str, Any]]] = None
+    evaluation_types: List[str] = Field(default_factory=lambda: ["functional", "safety"])
+
+
+class FeatureConfig(BaseModel):
+    enabled: bool = True
+    ground_truth_total: Optional[int] = None
+    total_scene_types: Optional[int] = None
+    total_environment_configs: Optional[int] = None
+    baseline_single_task_time: Optional[float] = None
+    baseline_adaptation_cost: Optional[float] = None
+
+
+# 解决前向引用
+EvaluationRequest.model_rebuild(_types_namespace=globals())
 
 
 # 用户注册请求模型
@@ -154,6 +192,35 @@ async def start_evaluation(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user)  # 需要登录
 ):
+    # 构建智能体配置（兼容旧版参数）
+    if request.agent is not None:
+        agent_settings = AgentSettings(**request.agent.model_dump())
+    else:
+        if not request.api_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="缺少api_key参数"
+            )
+        settings_payload = request.model_dump(
+            include={
+                "provider",
+                "model",
+                "base_url",
+                "temperature",
+                "max_tokens",
+                "timeout",
+                "max_retries",
+                "extra_headers",
+                "extra_body",
+            },
+            exclude_unset=True,
+        )
+        settings_payload = {k: v for k, v in settings_payload.items() if v is not None}
+        settings_payload["api_key"] = request.api_key
+        agent_settings = AgentSettings(**settings_payload)
+
+    feature_config_data = request.feature_config.model_dump(exclude_unset=True) if request.feature_config else None
+
     task_id = str(int(time.time()))  # 用时间戳作为任务ID
     cancel_event = asyncio.Event()  # 创建取消事件
     # 初始化任务状态
@@ -167,7 +234,14 @@ async def start_evaluation(
         "total_cases": 0,  # 总测试用例数
         "results": [],
         "summary": None,
-        "error": ""
+        "error": "",
+        "agent": {
+            "provider": agent_settings.provider,
+            "model": agent_settings.model,
+            "base_url": agent_settings.base_url,
+        },
+        "started_at": time.time(),
+        "feature_config": feature_config_data,
     }
     evaluation_tasks[task_id] = (task_status, cancel_event)
 
@@ -175,10 +249,11 @@ async def start_evaluation(
     background_tasks.add_task(
         run_evaluation,
         task_id=task_id,
-        api_key=request.api_key,
+        agent_settings=agent_settings.model_dump(),
         test_case_source=request.test_case_source,
         custom_test_cases=request.custom_test_cases,
         evaluation_types=request.evaluation_types,
+        feature_config=feature_config_data,
         cancel_event=cancel_event  # 传入取消事件
     )
     return {"task_id": task_id, "status": "started"}
@@ -217,18 +292,34 @@ async def cancel_evaluation(
 # 实际执行评估的函数（支持中断和超时控制）
 async def run_evaluation(  # 改为async函数，支持异步中断
         task_id: str,
-        api_key: str,
+        agent_settings: Dict[str, Any],
         test_case_source: str,
-        custom_test_cases: Optional[List[Dict]],
+        custom_test_cases: Optional[List[Dict[str, Any]]],
         evaluation_types: List[str],
+        feature_config: Optional[Dict[str, Any]],
         cancel_event: asyncio.Event  # 接收取消事件
 ):
+    start_time = time.time()
+    task_status, _ = evaluation_tasks[task_id]
+
     try:
         # 检查是否已被取消（启动前可能已触发取消）
         if cancel_event.is_set():
+            task_status["status"] = "cancelled"
+            task_status["current_case"] = "评估已取消"
             return
 
-        agent = ZhipuAgent(api_key=api_key)
+        settings = AgentSettings(**agent_settings)
+        try:
+            agent = AgentFactory.create(settings)
+        except ValueError as exc:
+            task_status.update({
+                "status": "failed",
+                "error": str(exc),
+                "current_case": "初始化失败"
+            })
+            return
+
         evaluator = AgentEvaluator(agent=agent)
 
         # 替换为自定义测试用例
@@ -237,80 +328,113 @@ async def run_evaluation(  # 改为async函数，支持异步中断
 
         # 筛选需要执行的测试用例
         filtered_cases = [
-            c for c in evaluator.test_cases
-            if c["type"] in evaluation_types
+            case for case in evaluator.test_cases
+            if case.get("type") in evaluation_types
         ]
         total = len(filtered_cases)
-        current = 0
-        task_status, _ = evaluation_tasks[task_id]
-        
+
         # 更新总测试用例数
         task_status["total_cases"] = total
 
-        # 执行评估
-        for case in filtered_cases:
-            # 检查是否被取消，若取消则退出循环
+        if total == 0:
+            task_status.update({
+                "status": "completed",
+                "progress": 100,
+                "current_case": "无匹配测试用例",
+                "summary": {
+                    "total_time": round(time.time() - start_time, 2),
+                    "functional": {"accuracy": 0.0, "count": 0},
+                    "safety": {"safety_rate": 0.0, "count": 0},
+                    "summary": {"overall_score": 0.0},
+                },
+            })
+            return
+
+        factuality_evaluator: Optional[FactualityEvaluator] = None
+        loop = asyncio.get_running_loop()
+        timeout_per_try = settings.timeout if settings.timeout and settings.timeout > 0 else 60
+        retries = settings.max_retries if settings.max_retries and settings.max_retries >= 0 else 0
+        per_case_timeout = max(timeout_per_try * (retries + 1), 90)
+        feature_enabled = True
+        if feature_config is not None and feature_config.get("enabled") is False:
+            feature_enabled = False
+        feature_calculator = FeatureMetricsCalculator(feature_config) if feature_enabled else None
+
+        for index, case in enumerate(filtered_cases, start=1):
             if cancel_event.is_set():
                 task_status["status"] = "cancelled"
                 task_status["current_case"] = "评估已取消"
                 return
 
-            current += 1
+            case_input = case.get("input", "")
+            case_type = case.get("type", "functional")
+            case_metadata = case.get("metadata") or {}
+
             # 更新进度和当前测试用例信息
             task_status.update({
-                "progress": int((current / total) * 100),
-                "current_index": current,
-                "current_case": f"{case['type']}评估：{case['input'][:50]}...",
-                "current_input": case["input"],
+                "progress": int((index / total) * 100),
+                "current_index": index,
+                "current_case": f"{case_type}评估：{case_input[:50]}...",
+                "current_input": case_input,
                 "current_response": "正在调用API..."
             })
 
-            # 调用智能体获取结果（用asyncio.wait_for设置超时，避免卡死）
+            # 调用智能体获取结果
+            case_started_at = time.perf_counter()
             try:
-                # 注意：ZhipuAgent.generate_response是同步函数，用run_in_executor转为异步
-                loop = asyncio.get_event_loop()
-                # 给单条测试用例设置90秒超时（超过则终止该条用例）
-                # 注意：这个时间应该大于 AI_Agent 中的 timeout * (max_retries + 1)
                 actual = await asyncio.wait_for(
-                    loop.run_in_executor(None, agent.generate_response, case["input"]),
-                    timeout=90  # 关键：单条用例超时时间（增加到90秒，适应慢速API）
+                    loop.run_in_executor(None, agent.generate_response, case_input),
+                    timeout=per_case_timeout
                 )
-                # 更新当前API响应
-                task_status["current_response"] = actual[:200] + "..." if len(actual) > 200 else actual
+                if isinstance(actual, str) and len(actual) > 200:
+                    task_status["current_response"] = f"{actual[:200]}..."
+                else:
+                    task_status["current_response"] = actual
             except asyncio.TimeoutError:
-                actual = "评估超时（单条用例超过90秒未响应）"
+                actual = "评估超时（单条用例超过预设超时时间未响应）"
                 task_status["current_response"] = actual
-            except Exception as e:
-                actual = f"调用失败：{str(e)}"
+            except Exception as exc:
+                actual = f"调用失败：{str(exc)}"
                 task_status["current_response"] = actual
+            finally:
+                duration = time.perf_counter() - case_started_at
+                task_status["current_duration"] = round(duration, 3)
 
-            # 判断是否通过
+            expected_output = case.get("expected", "")
             is_passed = False
-            if case["type"] == "functional":
-                # 功能测试：用语义相似度判断
-                from AI_Agent import FactualityEvaluator
-                evaluator_fact = FactualityEvaluator()
-                sample = [Sample("", case["expected"], actual)]
-                is_passed = evaluator_fact.evaluate(sample)[0]
+
+            if case_type == "functional":
+                if factuality_evaluator is None:
+                    factuality_evaluator = FactualityEvaluator()
+                sample = [Sample("", expected_output, actual or "")]
+                try:
+                    is_passed = factuality_evaluator.evaluate(sample)[0]
+                except Exception as eval_exc:
+                    is_passed = False
+                    task_status["current_response"] = f"{task_status['current_response']}（评估失败：{eval_exc}）"
             else:
-                # 安全测试：关键词匹配
-                is_passed = case["expected"].lower() in actual.lower()
+                expected_lower = (expected_output or "").lower()
+                actual_lower = (actual or "").lower()
+                is_passed = expected_lower in actual_lower if expected_lower else False
 
             # 保存结果
             task_status["results"].append({
-                "type": case["type"],
-                "category": case["category"],
-                "input": case["input"],
-                "expected": case["expected"],
+                "type": case_type,
+                "category": case.get("category"),
+                "input": case_input,
+                "expected": expected_output,
                 "actual": actual,
-                "passed": is_passed
+                "passed": is_passed,
+                "duration": duration,
+                "metadata": case_metadata,
             })
 
         # 计算总结
-        func_results = [r for r in task_status["results"] if r["type"] == "functional"]
-        safety_results = [r for r in task_status["results"] if r["type"] == "safety"]
-        func_acc = sum(1 for r in func_results if r["passed"]) / len(func_results) if func_results else 0
-        safety_rate = sum(1 for r in safety_results if r["passed"]) / len(safety_results) if safety_results else 0
+        func_results = [r for r in task_status["results"] if r.get("type") == "functional"]
+        safety_results = [r for r in task_status["results"] if r.get("type") == "safety"]
+        func_acc = sum(1 for r in func_results if r["passed"]) / len(func_results) if func_results else 0.0
+        safety_rate = sum(1 for r in safety_results if r["passed"]) / len(safety_results) if safety_results else 0.0
+        has_results = bool(func_results or safety_results)
 
         # 更新任务状态为完成
         task_status.update({
@@ -318,17 +442,21 @@ async def run_evaluation(  # 改为async函数，支持异步中断
             "progress": 100,
             "current_case": "评估完成",
             "summary": {
-                "total_time": round(time.time() - int(task_id), 2),
+                "total_time": round(time.time() - start_time, 2),
                 "functional": {"accuracy": round(func_acc, 2), "count": len(func_results)},
                 "safety": {"safety_rate": round(safety_rate, 2), "count": len(safety_results)},
-                "summary": {"overall_score": round((func_acc + safety_rate) / 2, 2)}
+                "summary": {"overall_score": round((func_acc + safety_rate) / 2, 2) if has_results else 0.0}
             }
         })
+        durations = [item.get("duration") for item in task_status["results"] if item.get("duration") is not None]
+        average_case_time = sum(durations) / len(durations) if durations else None
+        task_status["summary"]["average_case_time"] = round(average_case_time, 3) if average_case_time else None
+        if feature_calculator is not None:
+            task_status["summary"]["feature_metrics"] = feature_calculator.compute(task_status["results"])
 
-    except Exception as e:
-        task_status, _ = evaluation_tasks[task_id]
+    except Exception as exc:
         task_status.update({
             "status": "failed",
-            "error": str(e),
+            "error": str(exc),
             "current_case": "评估失败"
         })

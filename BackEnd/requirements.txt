@@ -22,3 +22,6 @@ bcrypt==4.0.1  # 固定bcrypt版本，与passlib 1.7.4兼容
 python-multipart==0.0.6  # 表单数据处理
 sqlalchemy==2.0.23  # ORM数据库框架
 email-validator==2.1.0  # 邮箱验证（EmailStr需要）
+
+# MySQL 驱动
+pymysql==1.1.0
