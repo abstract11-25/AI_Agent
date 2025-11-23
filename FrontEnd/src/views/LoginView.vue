@@ -129,6 +129,13 @@
               />
               <div class="form-tip">请确保与上方密码完全一致</div>
             </el-form-item>
+            <el-form-item label="用户角色" prop="role">
+              <el-radio-group v-model="registerForm.role">
+                <el-radio label="user">普通用户</el-radio>
+                <el-radio label="admin">管理员</el-radio>
+              </el-radio-group>
+              <div class="form-tip">普通用户只能使用管理员添加的API密钥，管理员可以添加和管理API密钥</div>
+            </el-form-item>
             <el-form-item>
               <el-button
                 type="primary"
@@ -171,7 +178,8 @@ const registerForm = reactive({
   username: '',
   email: '',
   password: '',
-  confirmPassword: ''
+  confirmPassword: '',
+  role: 'user'  // 默认普通用户
 })
 
 // 登录表单验证规则
@@ -255,7 +263,8 @@ const handleRegister = async () => {
       const result = await userStore.register(
         registerForm.username,
         registerForm.email,
-        registerForm.password
+        registerForm.password,
+        registerForm.role
       )
       loading.value = false
       

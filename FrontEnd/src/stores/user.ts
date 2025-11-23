@@ -7,6 +7,7 @@ interface User {
   id: number
   username: string
   email: string
+  role?: string  // 角色：admin 或 user
 }
 
 export const useUserStore = defineStore('user', () => {
@@ -72,12 +73,13 @@ export const useUserStore = defineStore('user', () => {
   }
 
   // 注册
-  async function register(username: string, email: string, password: string) {
+  async function register(username: string, email: string, password: string, role: string = 'user') {
     try {
       const response = await axios.post('http://127.0.0.1:8000/api/auth/register', {
         username,
         email,
-        password
+        password,
+        role
       })
 
       ElMessage.success('注册成功，请登录')

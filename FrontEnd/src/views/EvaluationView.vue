@@ -84,11 +84,20 @@
                   style="flex: 1;"
                 />
                 <el-button
+                  v-if="userStore.user?.role === 'admin'"
                   type="primary"
                   plain
                   @click="showApiKeyDialog = true"
                 >
                   管理密钥
+                </el-button>
+                <el-button
+                  v-else
+                  type="primary"
+                  plain
+                  @click="showApiKeyDialog = true"
+                >
+                  查看密钥
                 </el-button>
               </div>
             </el-form-item>
@@ -202,60 +211,87 @@
                 </el-form-item>
               </el-collapse-item>
 
-              <el-collapse-item title="特征评估配置" name="feature">
-                <el-form-item label="启用特征评估">
-                  <el-switch v-model="form.featureMetricsEnabled" />
-                </el-form-item>
+              <el-collapse-item title="特征评估配置" name="feature" class="feature-config-section">
+                <div class="feature-switch-wrapper">
+                  <el-form-item label="启用特征评估" class="feature-switch-item">
+                    <el-switch 
+                      v-model="form.featureMetricsEnabled" 
+                      size="large"
+                      active-text="已启用"
+                      inactive-text="已禁用"
+                    />
+                  </el-form-item>
+                </div>
                 <template v-if="form.featureMetricsEnabled">
-                  <el-row :gutter="12">
-                    <el-col :span="12">
-                      <el-form-item label="真实正例总数">
-                        <el-input-number
-                          v-model="form.groundTruthTotal"
-                          :min="0"
-                          :controls="false"
-                          placeholder="默认按用例数量"
-                          style="width: 100%;"
-                        />
-                      </el-form-item>
-                    </el-col>
-                    <el-col :span="12">
-                      <el-form-item label="场景类型总数">
-                        <el-input-number
-                          v-model="form.totalSceneTypes"
-                          :min="0"
-                          :controls="false"
-                          placeholder="例如：5"
-                          style="width: 100%;"
-                        />
-                      </el-form-item>
-                    </el-col>
-                    <el-col :span="12">
-                      <el-form-item label="单主体基准耗时(s)">
-                        <el-input-number
-                          v-model="form.baselineSingleTaskTime"
-                          :min="0"
-                          :precision="3"
-                          :controls="false"
-                          placeholder="协同基准耗时"
-                          style="width: 100%;"
-                        />
-                      </el-form-item>
-                    </el-col>
-                    <el-col :span="12">
-                      <el-form-item label="基准适配成本">
-                        <el-input-number
-                          v-model="form.baselineAdaptationCost"
-                          :min="0"
-                          :precision="2"
-                          :controls="false"
-                          placeholder="例如：1.0"
-                          style="width: 100%;"
-                        />
-                      </el-form-item>
-                    </el-col>
-                  </el-row>
-                  <el-form-item label="评估特性">
+                  <div class="feature-params-section">
+                    <div class="section-title">
+                      <span>参数配置</span>
+                    </div>
+                    <el-row :gutter="16">
+                      <el-col :span="12">
+                        <div class="param-card">
+                          <el-form-item label="真实正例总数">
+                            <el-input-number
+                              v-model="form.groundTruthTotal"
+                              :min="0"
+                              :controls="false"
+                              placeholder="可选"
+                              class="feature-input"
+                            />
+                            <div class="text-help-small">不填则按用例数量计算</div>
+                          </el-form-item>
+                        </div>
+                      </el-col>
+                      <el-col :span="12">
+                        <div class="param-card">
+                          <el-form-item label="场景类型总数">
+                            <el-input-number
+                              v-model="form.totalSceneTypes"
+                              :min="0"
+                              :controls="false"
+                              placeholder="例如：5"
+                              class="feature-input"
+                            />
+                            <div class="text-help-small">用于计算场景覆盖度</div>
+                          </el-form-item>
+                        </div>
+                      </el-col>
+                      <el-col :span="12">
+                        <div class="param-card">
+                          <el-form-item label="单主体基准耗时">
+                            <el-input-number
+                              v-model="form.baselineSingleTaskTime"
+                              :min="0"
+                              :precision="3"
+                              :controls="false"
+                              placeholder="可选"
+                              class="feature-input"
+                            />
+                            <div class="text-help-small">单主体完成任务的基准时间（单位：秒）</div>
+                          </el-form-item>
+                        </div>
+                      </el-col>
+                      <el-col :span="12">
+                        <div class="param-card">
+                          <el-form-item label="基准适配成本">
+                            <el-input-number
+                              v-model="form.baselineAdaptationCost"
+                              :min="0"
+                              :precision="2"
+                              :controls="false"
+                              placeholder="例如：1.0"
+                              class="feature-input"
+                            />
+                            <div class="text-help-small">用于计算适配成本系数</div>
+                          </el-form-item>
+                        </div>
+                      </el-col>
+                    </el-row>
+                  </div>
+                  <div class="feature-selection-section">
+                    <div class="section-title">
+                      <span>评估特性</span>
+                    </div>
                     <el-checkbox-group v-model="form.selectedFeatures">
                       <el-checkbox
                         v-for="item in featureOptions"
@@ -265,8 +301,20 @@
                         {{ item.label }}
                       </el-checkbox>
                     </el-checkbox-group>
-                    <div class="text-help">未选中的特性不会计算，对应的结果面板也会隐藏。</div>
-                  </el-form-item>
+                    <el-alert
+                      type="info"
+                      :closable="false"
+                      show-icon
+                      class="feature-alert"
+                    >
+                      <template #title>
+                        <div class="alert-content">
+                          <div class="alert-title">提示</div>
+                          <div class="alert-text">未选中的特性不会计算，对应的结果面板也会隐藏。</div>
+                        </div>
+                      </template>
+                    </el-alert>
+                  </div>
                 </template>
               </el-collapse-item>
             </el-collapse>
@@ -394,7 +442,7 @@
                 <div class="stat-label">功能评估准确率</div>
                 <div class="stat-value">{{ (evaluationSummary.functional.accuracy * 100).toFixed(1) }}%</div>
                       <div class="stat-subvalue">
-                  通过 {{ evaluationSummary.functional.count }} 项
+                  通过 {{ evaluationSummary.functional.passed_count ?? Math.round(evaluationSummary.functional.accuracy * evaluationSummary.functional.count) }} / {{ evaluationSummary.functional.count }} 项
                 </div>
               </div>
             </el-col>
@@ -403,7 +451,7 @@
                 <div class="stat-label">安全评估通过率</div>
                 <div class="stat-value">{{ (evaluationSummary.safety.safety_rate * 100).toFixed(1) }}%</div>
                       <div class="stat-subvalue">
-                  通过 {{ evaluationSummary.safety.count }} 项
+                  通过 {{ evaluationSummary.safety.passed_count ?? Math.round(evaluationSummary.safety.safety_rate * evaluationSummary.safety.count) }} / {{ evaluationSummary.safety.count }} 项
                 </div>
               </div>
             </el-col>
@@ -464,9 +512,9 @@
           <el-tab-pane
             label="特征指标"
             name="features"
-            :disabled="!basicFeatureMetrics && !(generalizationMetrics && (hasValues(generalizationMetrics?.adaptivity) || hasValues(generalizationMetrics?.robustness) || hasValues(generalizationMetrics?.portability) || hasValues(generalizationMetrics?.collaboration)))"
+            :disabled="!basicFeatureMetrics && !(generalizationMetrics && ((hasValues(generalizationMetrics?.adaptivity) && isFeatureSelected('adaptivity')) || (hasValues(generalizationMetrics?.robustness) && isFeatureSelected('robustness')) || (hasValues(generalizationMetrics?.portability) && isFeatureSelected('portability')) || (hasValues(generalizationMetrics?.collaboration) && isFeatureSelected('collaboration'))))"
           >
-            <template v-if="basicFeatureMetrics || (generalizationMetrics && (hasValues(generalizationMetrics?.adaptivity) || hasValues(generalizationMetrics?.robustness) || hasValues(generalizationMetrics?.portability) || hasValues(generalizationMetrics?.collaboration)))">
+            <template v-if="basicFeatureMetrics || (generalizationMetrics && ((hasValues(generalizationMetrics?.adaptivity) && isFeatureSelected('adaptivity')) || (hasValues(generalizationMetrics?.robustness) && isFeatureSelected('robustness')) || (hasValues(generalizationMetrics?.portability) && isFeatureSelected('portability')) || (hasValues(generalizationMetrics?.collaboration) && isFeatureSelected('collaboration'))))">
               <el-card v-if="basicFeatureMetrics" class="subtle-card">
                 <template #header>基础特征指标</template>
                 <el-descriptions :column="3" size="small" border>
@@ -492,12 +540,12 @@
               </el-card>
 
               <el-card
-                v-if="generalizationMetrics && (hasValues(generalizationMetrics?.adaptivity) || hasValues(generalizationMetrics?.robustness) || hasValues(generalizationMetrics?.portability) || hasValues(generalizationMetrics?.collaboration))"
+                v-if="generalizationMetrics && ((hasValues(generalizationMetrics?.adaptivity) && isFeatureSelected('adaptivity')) || (hasValues(generalizationMetrics?.robustness) && isFeatureSelected('robustness')) || (hasValues(generalizationMetrics?.portability) && isFeatureSelected('portability')) || (hasValues(generalizationMetrics?.collaboration) && isFeatureSelected('collaboration')))"
                 style="margin-top: 20px;"
                 class="subtle-card"
               >
                 <template #header>通用化指标</template>
-                <div class="metric-section" v-if="hasValues(generalizationMetrics?.adaptivity)">
+                <div class="metric-section" v-if="hasValues(generalizationMetrics?.adaptivity) && isFeatureSelected('adaptivity')">
                   <h4>适应性</h4>
                   <el-descriptions :column="2" size="small" border>
                     <el-descriptions-item label="训练场景完成率">
@@ -531,7 +579,7 @@
                   </el-descriptions>
                 </div>
 
-                <div class="metric-section" v-if="hasValues(generalizationMetrics?.robustness)">
+                <div class="metric-section" v-if="hasValues(generalizationMetrics?.robustness) && isFeatureSelected('robustness')">
                   <h4>鲁棒性</h4>
                   <el-descriptions :column="2" size="small" border>
                     <el-descriptions-item label="异常输入错误率">
@@ -555,7 +603,7 @@
                   </el-descriptions>
                 </div>
 
-                <div class="metric-section" v-if="hasValues(generalizationMetrics?.portability)">
+                <div class="metric-section" v-if="hasValues(generalizationMetrics?.portability) && isFeatureSelected('portability')">
                   <h4>可移植性</h4>
                   <el-descriptions :column="2" size="small" border>
                     <el-descriptions-item label="跨环境部署成功率">
@@ -576,7 +624,7 @@
                   </el-descriptions>
                 </div>
 
-                <div class="metric-section" v-if="hasValues(generalizationMetrics?.collaboration)">
+                <div class="metric-section" v-if="hasValues(generalizationMetrics?.collaboration) && isFeatureSelected('collaboration')">
                   <h4>协作效率</h4>
                   <el-descriptions :column="2" size="small" border>
                     <el-descriptions-item label="信息交互准确率">
@@ -612,6 +660,10 @@
     >
       <el-tabs v-model="apiKeyDialogTab">
         <el-tab-pane label="密钥列表" name="list">
+          <div v-if="userStore.user?.role !== 'admin'" style="margin-bottom: 16px; padding: 12px; background: #f0f9ff; border-radius: 8px; color: #606266; font-size: 13px;">
+            <el-icon style="margin-right: 4px;"><InfoFilled /></el-icon>
+            您只能查看和使用管理员添加的API密钥，无法保存自己的密钥。
+          </div>
           <el-table :data="savedApiKeys" style="width: 100%" stripe>
             <el-table-column prop="name" label="名称" width="200" />
             <el-table-column prop="provider" label="服务商" width="120">
@@ -642,6 +694,7 @@
                   设为默认
                 </el-button>
                 <el-button
+                  v-if="userStore.user?.role === 'admin'"
                   type="danger"
                   link
                   size="small"
@@ -658,7 +711,7 @@
             :image-size="100"
           />
         </el-tab-pane>
-        <el-tab-pane label="添加密钥" name="add">
+        <el-tab-pane v-if="userStore.user?.role === 'admin'" label="添加密钥" name="add">
           <el-form
             :model="newApiKeyForm"
             label-width="120px"
@@ -710,7 +763,7 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { User, ArrowDown } from '@element-plus/icons-vue'
+import { User, ArrowDown, InfoFilled } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import { useUserStore } from '../stores/user'
 
@@ -769,10 +822,12 @@ interface EvaluationSummary {
   functional?: {
     accuracy: number
     count: number
+    passed_count?: number
   }
   safety?: {
     safety_rate: number
     count: number
+    passed_count?: number
   }
   summary: {
     overall_score: number
@@ -1021,6 +1076,7 @@ const evaluationSummary = ref<EvaluationSummary | null>(null)
 const resultFilter = ref('')
 let pollInterval: NodeJS.Timeout | null = null
 const taskId = ref('')  // 新增：存储当前任务ID
+const taskFeatureConfig = ref<{ features?: string[] } | null>(null)  // 新增：存储任务的特征配置
 interface AgentRuntimeInfo {
   provider?: string
   model?: string
@@ -1058,6 +1114,21 @@ const featureMetrics = computed(() => evaluationSummary.value?.feature_metrics ?
 const basicFeatureMetrics = computed(() => featureMetrics.value?.basic ?? null)
 const generalizationMetrics = computed(() => featureMetrics.value?.generalization ?? null)
 
+// 获取评估时选择的特性（从任务配置或当前表单）
+const selectedFeaturesForDisplay = computed(() => {
+  // 优先使用任务配置中的特性（评估时的选择）
+  if (taskFeatureConfig.value?.features && taskFeatureConfig.value.features.length > 0) {
+    return taskFeatureConfig.value.features.map(f => f.toLowerCase())
+  }
+  // 如果没有任务配置，使用当前表单的选择
+  return form.selectedFeatures.map(f => f.toLowerCase())
+})
+
+// 检查特性是否被选择
+const isFeatureSelected = (featureName: string) => {
+  return selectedFeaturesForDisplay.value.includes(featureName.toLowerCase())
+}
+
 const formatPercent = (value?: number | null) => {
   if (value === null || value === undefined) return 'N/A'
   return `${value.toFixed(2)}%`
@@ -1094,6 +1165,7 @@ const startEvaluation = async () => {
   evaluationResults.value = []
   evaluationSummary.value = null
   taskId.value = ''  // 重置任务ID
+  taskFeatureConfig.value = null  // 重置特征配置
   agentInfo.value = null
   activeTab.value = 'progress'
 
@@ -1244,6 +1316,10 @@ const startEvaluation = async () => {
         evaluationResults.value = taskStatus.results || []
         if (taskStatus.agent) {
           agentInfo.value = taskStatus.agent
+        }
+        // 保存任务的特征配置
+        if (taskStatus.feature_config) {
+          taskFeatureConfig.value = taskStatus.feature_config
         }
 
         // 处理所有可能的状态：完成、失败、取消
@@ -1846,6 +1922,149 @@ onMounted(async () => {
   color: #7a8aa0;
   font-size: 12px;
   margin-top: 5px;
+}
+
+.text-help-small {
+  color: #909399;
+  font-size: 11px;
+  margin-top: 4px;
+  line-height: 1.4;
+  word-wrap: break-word;
+  white-space: normal;
+}
+
+/* 特征评估配置美化样式 */
+.feature-config-section {
+  margin-top: 8px;
+}
+
+.feature-switch-wrapper {
+  background: linear-gradient(135deg, rgba(64, 158, 255, 0.08) 0%, rgba(64, 158, 255, 0.03) 100%);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 20px;
+  border: 1px solid rgba(64, 158, 255, 0.1);
+}
+
+.feature-switch-item :deep(.el-form-item__label) {
+  font-weight: 600;
+  color: #1f2d3d;
+  font-size: 14px;
+}
+
+.feature-switch-item :deep(.el-switch) {
+  --el-switch-on-color: #409EFF;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2d3d;
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid rgba(64, 158, 255, 0.15);
+}
+
+
+.feature-params-section {
+  margin-bottom: 24px;
+}
+
+.param-card {
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 12px;
+  padding: 16px;
+  border: 1px solid rgba(64, 158, 255, 0.12);
+  transition: all 0.3s ease;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.param-card:hover {
+  border-color: rgba(64, 158, 255, 0.3);
+  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.1);
+  transform: translateY(-2px);
+}
+
+.param-card :deep(.el-form-item) {
+  margin-bottom: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.param-card :deep(.el-form-item__content) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.param-card :deep(.el-form-item__label) {
+  font-weight: 500;
+  color: #303133;
+  font-size: 13px;
+  padding-bottom: 8px;
+}
+
+.param-card :deep(.el-input-number) {
+  width: 100%;
+}
+
+.feature-input {
+  width: 100%;
+}
+
+.param-card :deep(.el-input-number__input) {
+  width: 100%;
+  min-width: 0;
+}
+
+.feature-input :deep(.el-input__wrapper) {
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.feature-input :deep(.el-input__wrapper:hover) {
+  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.3) inset;
+}
+
+.feature-selection-section {
+  margin-top: 24px;
+}
+
+
+.feature-alert {
+  margin-top: 0;
+  border-radius: 10px;
+  border: 1px solid rgba(64, 158, 255, 0.2);
+  background: linear-gradient(135deg, rgba(64, 158, 255, 0.08) 0%, rgba(64, 158, 255, 0.04) 100%);
+}
+
+.feature-alert :deep(.el-alert__content) {
+  padding: 0;
+}
+
+.alert-content {
+  font-size: 12px;
+  line-height: 1.6;
+  word-wrap: break-word;
+  white-space: normal;
+}
+
+.alert-title {
+  font-weight: 600;
+  color: #409EFF;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.alert-text {
+  color: #606266;
+  line-height: 1.6;
 }
 
 @media screen and (max-width: 1400px) {

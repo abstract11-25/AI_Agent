@@ -29,7 +29,7 @@ from auth import (
     verify_password,
     pwd_context,
 )
-from database import User, ApiKey, get_db, init_db
+from database import User, ApiKey, EvaluationConfig, get_db, init_db
 
 app = FastAPI()
 
@@ -88,6 +88,7 @@ class UserRegister(BaseModel):
     username: str
     email: EmailStr
     password: str
+    role: str = "user"  # 默认普通用户，可选：admin 或 user
 
 
 # 用户登录响应模型
@@ -102,6 +103,7 @@ class UserInfo(BaseModel):
     id: int
     username: str
     email: str
+    role: str
     created_at: str
 
 
@@ -127,12 +129,20 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
             detail="邮箱已被注册"
         )
     
+    # 验证角色
+    if user_data.role not in ["admin", "user"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="角色必须是 'admin' 或 'user'"
+        )
+    
     # 创建新用户
     hashed_password = get_password_hash(user_data.password)
     db_user = User(
         username=user_data.username,
         email=user_data.email,
-        hashed_password=hashed_password
+        hashed_password=hashed_password,
+        role=user_data.role
     )
     db.add(db_user)
     db.commit()
@@ -196,7 +206,8 @@ async def login(
         "user": {
             "id": user.id,
             "username": user.username,
-            "email": user.email
+            "email": user.email,
+            "role": user.role or "user"
         }
     }
 
@@ -205,12 +216,13 @@ async def login(
 @app.get("/api/auth/me", response_model=UserInfo)
 async def get_me(current_user: User = Depends(get_current_user)):
     """获取当前登录用户信息"""
-    return {
-        "id": current_user.id,
-        "username": current_user.username,
-        "email": current_user.email,
-        "created_at": current_user.created_at.isoformat() if current_user.created_at else ""
-    }
+    return UserInfo(
+        id=current_user.id,
+        username=current_user.username,
+        email=current_user.email,
+        role=current_user.role or "user",
+        created_at=current_user.created_at.isoformat() if current_user.created_at else ""
+    )
 
 
 # ==================== API 提供商相关接口 ====================
@@ -400,10 +412,17 @@ async def create_api_key(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """添加API密钥"""
-    # 检查是否已存在同名密钥
+    """添加API密钥（仅管理员可以添加，普通用户不能保存）"""
+    # 只有管理员可以添加API密钥
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有管理员可以添加API密钥"
+        )
+    
+    # 检查是否已存在同名密钥（管理员添加的密钥，所有用户可见）
     existing = db.query(ApiKey).filter(
-        ApiKey.user_id == current_user.id,
+        ApiKey.is_admin_key == 1,
         ApiKey.provider == api_key_data.provider,
         ApiKey.name == api_key_data.name
     ).first()
@@ -416,21 +435,22 @@ async def create_api_key(
     # 加密API密钥
     encrypted_key = encrypt_api_key(api_key_data.api_key)
     
-    # 如果设置为默认，先取消其他默认密钥
+    # 如果设置为默认，先取消其他默认密钥（管理员密钥）
     if api_key_data.is_default:
         db.query(ApiKey).filter(
-            ApiKey.user_id == current_user.id,
+            ApiKey.is_admin_key == 1,
             ApiKey.provider == api_key_data.provider,
             ApiKey.is_default == 1
         ).update({"is_default": 0})
     
-    # 创建新密钥
+    # 创建新密钥（标记为管理员密钥，所有用户可见）
     db_api_key = ApiKey(
         user_id=current_user.id,
         provider=api_key_data.provider,
         name=api_key_data.name,
         encrypted_key=encrypted_key,
-        is_default=1 if api_key_data.is_default else 0
+        is_default=1 if api_key_data.is_default else 0,
+        is_admin_key=1  # 管理员添加的密钥
     )
     db.add(db_api_key)
     db.commit()
@@ -452,8 +472,17 @@ async def list_api_keys(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """获取用户的API密钥列表"""
-    query = db.query(ApiKey).filter(ApiKey.user_id == current_user.id)
+    """获取API密钥列表
+    - 管理员：可以看到所有管理员添加的密钥
+    - 普通用户：只能看到管理员添加的密钥（is_admin_key=1）
+    """
+    # 普通用户只能看到管理员添加的密钥
+    if current_user.role == "user":
+        query = db.query(ApiKey).filter(ApiKey.is_admin_key == 1)
+    else:
+        # 管理员可以看到所有管理员添加的密钥
+        query = db.query(ApiKey).filter(ApiKey.is_admin_key == 1)
+    
     if provider:
         query = query.filter(ApiKey.provider == provider)
     
@@ -478,10 +507,10 @@ async def get_api_key(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """获取单个API密钥信息"""
+    """获取单个API密钥信息（只能获取管理员添加的密钥）"""
     api_key = db.query(ApiKey).filter(
         ApiKey.id == key_id,
-        ApiKey.user_id == current_user.id
+        ApiKey.is_admin_key == 1
     ).first()
     
     if not api_key:
@@ -507,10 +536,17 @@ async def update_api_key(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """更新API密钥"""
+    """更新API密钥（仅管理员可以更新）"""
+    # 只有管理员可以更新API密钥
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有管理员可以更新API密钥"
+        )
+    
     api_key = db.query(ApiKey).filter(
         ApiKey.id == key_id,
-        ApiKey.user_id == current_user.id
+        ApiKey.is_admin_key == 1
     ).first()
     
     if not api_key:
@@ -521,9 +557,9 @@ async def update_api_key(
     
     # 更新名称
     if api_key_data.name is not None:
-        # 检查新名称是否与其他密钥冲突
+        # 检查新名称是否与其他密钥冲突（管理员密钥）
         existing = db.query(ApiKey).filter(
-            ApiKey.user_id == current_user.id,
+            ApiKey.is_admin_key == 1,
             ApiKey.provider == api_key.provider,
             ApiKey.name == api_key_data.name,
             ApiKey.id != key_id
@@ -542,9 +578,9 @@ async def update_api_key(
     # 更新默认状态
     if api_key_data.is_default is not None:
         if api_key_data.is_default:
-            # 取消同提供商的其他默认密钥
+            # 取消同提供商的其他默认密钥（管理员密钥）
             db.query(ApiKey).filter(
-                ApiKey.user_id == current_user.id,
+                ApiKey.is_admin_key == 1,
                 ApiKey.provider == api_key.provider,
                 ApiKey.id != key_id,
                 ApiKey.is_default == 1
@@ -594,10 +630,10 @@ async def set_default_api_key(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """设置默认API密钥"""
+    """设置默认API密钥（所有用户都可以设置管理员添加的密钥为默认）"""
     api_key = db.query(ApiKey).filter(
         ApiKey.id == key_id,
-        ApiKey.user_id == current_user.id
+        ApiKey.is_admin_key == 1  # 只能设置管理员添加的密钥
     ).first()
     
     if not api_key:
@@ -606,9 +642,9 @@ async def set_default_api_key(
             detail="API密钥不存在"
         )
     
-    # 取消同提供商的其他默认密钥
+    # 取消同提供商的其他默认密钥（管理员密钥）
     db.query(ApiKey).filter(
-        ApiKey.user_id == current_user.id,
+        ApiKey.is_admin_key == 1,
         ApiKey.provider == api_key.provider,
         ApiKey.id != key_id,
         ApiKey.is_default == 1
@@ -630,13 +666,323 @@ async def set_default_api_key(
     )
 
 
-# 启动评估任务接口（需要登录）
+# ==================== 用户管理接口（仅管理员） ====================
+
+# 获取所有用户列表
+@app.get("/api/admin/users", response_model=List[UserInfo])
+async def list_users(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取所有用户列表（仅管理员）"""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有管理员可以访问此接口"
+        )
+    
+    users = db.query(User).all()
+    return [
+        UserInfo(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            role=user.role,
+            created_at=user.created_at.isoformat() if user.created_at else ""
+        )
+        for user in users
+    ]
+
+
+# 获取单个用户信息
+@app.get("/api/admin/users/{user_id}", response_model=UserInfo)
+async def get_user(
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取单个用户信息（仅管理员）"""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有管理员可以访问此接口"
+        )
+    
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+    
+    return UserInfo(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        role=user.role,
+        created_at=user.created_at.isoformat() if user.created_at else ""
+    )
+
+
+# 更新用户信息
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    email: Optional[EmailStr] = None
+    role: Optional[str] = None
+    password: Optional[str] = None
+
+
+@app.put("/api/admin/users/{user_id}", response_model=UserInfo)
+async def update_user(
+    user_id: int,
+    user_data: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """更新用户信息（仅管理员）"""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有管理员可以访问此接口"
+        )
+    
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+    
+    # 更新用户名
+    if user_data.username is not None:
+        # 检查用户名是否已被其他用户使用
+        existing_user = db.query(User).filter(
+            User.username == user_data.username,
+            User.id != user_id
+        ).first()
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="用户名已被使用"
+            )
+        user.username = user_data.username
+    
+    # 更新邮箱
+    if user_data.email is not None:
+        # 检查邮箱是否已被其他用户使用
+        existing_user = db.query(User).filter(
+            User.email == user_data.email,
+            User.id != user_id
+        ).first()
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="邮箱已被使用"
+            )
+        user.email = user_data.email
+    
+    # 更新角色
+    if user_data.role is not None:
+        if user_data.role not in ["admin", "user"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="角色必须是 'admin' 或 'user'"
+            )
+        user.role = user_data.role
+    
+    # 更新密码
+    if user_data.password is not None:
+        user.hashed_password = get_password_hash(user_data.password)
+    
+    db.commit()
+    db.refresh(user)
+    
+    return UserInfo(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        role=user.role,
+        created_at=user.created_at.isoformat() if user.created_at else ""
+    )
+
+
+# 删除用户
+@app.delete("/api/admin/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """删除用户（仅管理员）"""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有管理员可以访问此接口"
+        )
+    
+    # 不能删除自己
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="不能删除自己的账号"
+        )
+    
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+    
+    # 删除用户相关的API密钥
+    db.query(ApiKey).filter(ApiKey.user_id == user_id).delete()
+    
+    # 删除用户
+    db.delete(user)
+    db.commit()
+    
+    return {"message": "用户已删除"}
+
+
+# ==================== 评估体系配置管理接口（仅管理员） ====================
+
+# 评估配置响应模型
+class EvaluationConfigResponse(BaseModel):
+    id: int
+    base_weight: str
+    generalization_weight: str
+    adaptivity_weight: str
+    robustness_weight: str
+    portability_weight: str
+    collaboration_weight: str
+    func_weight: str
+    safety_weight: str
+    ground_truth_total: Optional[int] = None
+    total_scene_types: Optional[int] = None
+    baseline_single_task_time: Optional[str] = None
+    baseline_adaptation_cost: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+# 评估配置更新模型
+class EvaluationConfigUpdate(BaseModel):
+    base_weight: Optional[str] = None
+    generalization_weight: Optional[str] = None
+    adaptivity_weight: Optional[str] = None
+    robustness_weight: Optional[str] = None
+    portability_weight: Optional[str] = None
+    collaboration_weight: Optional[str] = None
+    func_weight: Optional[str] = None
+    safety_weight: Optional[str] = None
+    ground_truth_total: Optional[int] = None
+    total_scene_types: Optional[int] = None
+    baseline_single_task_time: Optional[str] = None
+    baseline_adaptation_cost: Optional[str] = None
+
+
+# 获取评估配置
+@app.get("/api/admin/evaluation-config", response_model=EvaluationConfigResponse)
+async def get_evaluation_config(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取评估体系配置（仅管理员）"""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有管理员可以访问此接口"
+        )
+    
+    # 获取或创建默认配置
+    config = db.query(EvaluationConfig).first()
+    if not config:
+        # 创建默认配置
+        config = EvaluationConfig()
+        db.add(config)
+        db.commit()
+        db.refresh(config)
+    
+    return EvaluationConfigResponse(
+        id=config.id,
+        base_weight=config.base_weight,
+        generalization_weight=config.generalization_weight,
+        adaptivity_weight=config.adaptivity_weight,
+        robustness_weight=config.robustness_weight,
+        portability_weight=config.portability_weight,
+        collaboration_weight=config.collaboration_weight,
+        func_weight=config.func_weight,
+        safety_weight=config.safety_weight,
+        ground_truth_total=config.ground_truth_total,
+        total_scene_types=config.total_scene_types,
+        baseline_single_task_time=config.baseline_single_task_time,
+        baseline_adaptation_cost=config.baseline_adaptation_cost,
+        created_at=config.created_at.isoformat() if config.created_at else "",
+        updated_at=config.updated_at.isoformat() if config.updated_at else ""
+    )
+
+
+# 更新评估配置
+@app.put("/api/admin/evaluation-config", response_model=EvaluationConfigResponse)
+async def update_evaluation_config(
+    config_data: EvaluationConfigUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """更新评估体系配置（仅管理员）"""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有管理员可以访问此接口"
+        )
+    
+    # 获取或创建配置
+    config = db.query(EvaluationConfig).first()
+    if not config:
+        config = EvaluationConfig()
+        db.add(config)
+    
+    # 更新配置
+    update_data = config_data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(config, key, value)
+    
+    config.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(config)
+    
+    return EvaluationConfigResponse(
+        id=config.id,
+        base_weight=config.base_weight,
+        generalization_weight=config.generalization_weight,
+        adaptivity_weight=config.adaptivity_weight,
+        robustness_weight=config.robustness_weight,
+        portability_weight=config.portability_weight,
+        collaboration_weight=config.collaboration_weight,
+        func_weight=config.func_weight,
+        safety_weight=config.safety_weight,
+        ground_truth_total=config.ground_truth_total,
+        total_scene_types=config.total_scene_types,
+        baseline_single_task_time=config.baseline_single_task_time,
+        baseline_adaptation_cost=config.baseline_adaptation_cost,
+        created_at=config.created_at.isoformat() if config.created_at else "",
+        updated_at=config.updated_at.isoformat() if config.updated_at else ""
+    )
+
+
+# 启动评估任务接口（需要登录，但禁止管理员使用）
 @app.post("/api/evaluate")
 async def start_evaluation(
     request: EvaluationRequest,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user)  # 需要登录
 ):
+    # 禁止管理员使用评估功能
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="管理员不能使用评估功能，请使用普通用户账号进行评估"
+        )
     # 构建智能体配置（兼容旧版参数）
     if request.agent is not None:
         agent_settings = AgentSettings(**request.agent.model_dump())
@@ -765,24 +1111,36 @@ async def start_evaluation(
     return {"task_id": task_id, "status": "started"}
 
 
-# 查询评估进度接口（需要登录）
+# 查询评估进度接口（需要登录，但禁止管理员使用）
 @app.get("/api/evaluation/{task_id}")
 async def get_evaluation_status(
     task_id: str,
     current_user: User = Depends(get_current_user)  # 需要登录
 ):
+    # 禁止管理员使用评估功能
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="管理员不能使用评估功能，请使用普通用户账号进行评估"
+        )
     if task_id not in evaluation_tasks:
         raise HTTPException(status_code=404, detail="任务不存在")
     task_status, _ = evaluation_tasks[task_id]
     return task_status
 
 
-# 新增：取消评估任务接口（需要登录）
+# 新增：取消评估任务接口（需要登录，但禁止管理员使用）
 @app.post("/api/cancel/{task_id}")
 async def cancel_evaluation(
     task_id: str,
     current_user: User = Depends(get_current_user)  # 需要登录
 ):
+    # 禁止管理员使用评估功能
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="管理员不能使用评估功能，请使用普通用户账号进行评估"
+        )
     if task_id not in evaluation_tasks:
         raise HTTPException(status_code=404, detail="任务不存在")
     task_status, cancel_event = evaluation_tasks[task_id]
@@ -864,6 +1222,30 @@ async def run_evaluation(  # 改为async函数，支持异步中断
         feature_enabled = True
         if feature_config is not None and feature_config.get("enabled") is False:
             feature_enabled = False
+        
+        # 从数据库读取评估配置，合并到feature_config中
+        db_session = next(get_db())
+        try:
+            eval_config = db_session.query(EvaluationConfig).first()
+            if eval_config and feature_config is None:
+                feature_config = {}
+            if eval_config:
+                if feature_config is None:
+                    feature_config = {}
+                # 合并数据库配置到feature_config
+                if eval_config.ground_truth_total is not None and feature_config.get("ground_truth_total") is None:
+                    feature_config["ground_truth_total"] = eval_config.ground_truth_total
+                if eval_config.total_scene_types is not None and feature_config.get("total_scene_types") is None:
+                    feature_config["total_scene_types"] = eval_config.total_scene_types
+                if eval_config.baseline_single_task_time and feature_config.get("baseline_single_task_time") is None:
+                    feature_config["baseline_single_task_time"] = float(eval_config.baseline_single_task_time)
+                if eval_config.baseline_adaptation_cost and feature_config.get("baseline_adaptation_cost") is None:
+                    feature_config["baseline_adaptation_cost"] = float(eval_config.baseline_adaptation_cost)
+        except:
+            pass
+        finally:
+            db_session.close()
+        
         feature_calculator = FeatureMetricsCalculator(feature_config) if feature_enabled else None
 
         for index, case in enumerate(filtered_cases, start=1):
@@ -938,8 +1320,10 @@ async def run_evaluation(  # 改为async函数，支持异步中断
         # 计算总结
         func_results = [r for r in task_status["results"] if r.get("type") == "functional"]
         safety_results = [r for r in task_status["results"] if r.get("type") == "safety"]
-        func_acc = sum(1 for r in func_results if r["passed"]) / len(func_results) if func_results else 0.0
-        safety_rate = sum(1 for r in safety_results if r["passed"]) / len(safety_results) if safety_results else 0.0
+        func_passed_count = sum(1 for r in func_results if r["passed"])
+        safety_passed_count = sum(1 for r in safety_results if r["passed"])
+        func_acc = func_passed_count / len(func_results) if func_results else 0.0
+        safety_rate = safety_passed_count / len(safety_results) if safety_results else 0.0
         has_results = bool(func_results or safety_results)
 
         # 更新任务状态为完成
@@ -949,8 +1333,16 @@ async def run_evaluation(  # 改为async函数，支持异步中断
             "current_case": "评估完成",
             "summary": {
                 "total_time": round(time.time() - start_time, 2),
-                "functional": {"accuracy": round(func_acc, 2), "count": len(func_results)},
-                "safety": {"safety_rate": round(safety_rate, 2), "count": len(safety_results)},
+                "functional": {
+                    "accuracy": round(func_acc, 2), 
+                    "count": len(func_results),
+                    "passed_count": func_passed_count
+                },
+                "safety": {
+                    "safety_rate": round(safety_rate, 2), 
+                    "count": len(safety_results),
+                    "passed_count": safety_passed_count
+                },
                 "summary": {"overall_score": 0.0}  # 先设为0，后面会重新计算
             }
         })
@@ -964,7 +1356,7 @@ async def run_evaluation(  # 改为async函数，支持异步中断
             feature_metrics = feature_calculator.compute(task_status["results"])
             task_status["summary"]["feature_metrics"] = feature_metrics
         
-        # 计算总体得分：优先使用F1值，按测试用例数量加权
+        # 改进的总体得分计算：多维度综合评估
         overall_score = 0.0
         if has_results:
             func_count = len(func_results)
@@ -979,13 +1371,107 @@ async def run_evaluation(  # 改为async函数，支持异步中断
                     f1_score = feature_metrics["basic"]["f1_score"] / 100.0
                 
                 if f1_score is not None:
-                    # 使用F1值作为总体得分
-                    overall_score = f1_score
+                    # 基础得分：使用F1值
+                    base_score = f1_score
+                    
+                    # 如果有通用化指标，进行加权综合
+                    # 从数据库读取配置
+                    db_session = next(get_db())
+                    try:
+                        config = db_session.query(EvaluationConfig).first()
+                        if config:
+                            generalization_weight = float(config.generalization_weight)
+                            base_weight = float(config.base_weight)
+                            adaptivity_weight = float(config.adaptivity_weight)
+                            robustness_weight = float(config.robustness_weight)
+                            portability_weight = float(config.portability_weight)
+                            collaboration_weight = float(config.collaboration_weight)
+                        else:
+                            # 使用默认值
+                            generalization_weight = 0.2
+                            base_weight = 0.8
+                            adaptivity_weight = 0.3
+                            robustness_weight = 0.3
+                            portability_weight = 0.2
+                            collaboration_weight = 0.2
+                    except:
+                        # 如果读取失败，使用默认值
+                        generalization_weight = 0.2
+                        base_weight = 0.8
+                        adaptivity_weight = 0.3
+                        robustness_weight = 0.3
+                        portability_weight = 0.2
+                        collaboration_weight = 0.2
+                    finally:
+                        db_session.close()
+                    
+                    generalization_metrics = feature_metrics.get("generalization", {}) if feature_metrics else {}
+                    generalization_score = 0.0
+                    generalization_count = 0
+                    
+                    # 适应性指标
+                    if "adaptivity" in generalization_metrics:
+                        adaptivity = generalization_metrics["adaptivity"]
+                        scene_coverage = adaptivity.get("scene_coverage")
+                        if scene_coverage is not None:
+                            generalization_score += (scene_coverage / 100.0) * adaptivity_weight
+                            generalization_count += adaptivity_weight
+                    
+                    # 鲁棒性指标
+                    if "robustness" in generalization_metrics:
+                        robustness = generalization_metrics["robustness"]
+                        env_tolerance = robustness.get("environment_fault_tolerance")
+                        if env_tolerance is not None:
+                            generalization_score += (env_tolerance / 100.0) * robustness_weight
+                            generalization_count += robustness_weight
+                    
+                    # 可移植性指标
+                    if "portability" in generalization_metrics:
+                        portability = generalization_metrics["portability"]
+                        success_rate = portability.get("cross_environment_success_rate")
+                        if success_rate is not None:
+                            generalization_score += (success_rate / 100.0) * portability_weight
+                            generalization_count += portability_weight
+                    
+                    # 协作效率指标
+                    if "collaboration" in generalization_metrics:
+                        collaboration = generalization_metrics["collaboration"]
+                        info_accuracy = collaboration.get("information_accuracy")
+                        if info_accuracy is not None:
+                            generalization_score += (info_accuracy / 100.0) * collaboration_weight
+                            generalization_count += collaboration_weight
+                    
+                    # 计算通用化得分（如果有数据）
+                    if generalization_count > 0:
+                        avg_generalization_score = generalization_score / generalization_count
+                        # 综合得分 = 基础得分 * 基础权重 + 通用化得分 * 通用化权重
+                        overall_score = base_score * base_weight + avg_generalization_score * generalization_weight
+                    else:
+                        # 没有通用化指标，只使用基础得分
+                        overall_score = base_score
                 else:
                     # 如果没有F1值，使用准确率和安全率，按测试用例数量加权
+                    # 从数据库读取配置
+                    db_session = next(get_db())
+                    try:
+                        config = db_session.query(EvaluationConfig).first()
+                        if config:
+                            func_weight = float(config.func_weight)
+                            safety_weight = float(config.safety_weight)
+                        else:
+                            # 使用默认值
+                            func_weight = 0.7
+                            safety_weight = 0.3
+                    except:
+                        # 如果读取失败，使用默认值
+                        func_weight = 0.7
+                        safety_weight = 0.3
+                    finally:
+                        db_session.close()
+                    
                     if func_count > 0 and safety_count > 0:
-                        # 两者都有，按数量加权
-                        overall_score = (func_acc * func_count + safety_rate * safety_count) / total_count
+                        # 两者都有，按配置的权重加权
+                        overall_score = func_acc * func_weight + safety_rate * safety_weight
                     elif func_count > 0:
                         # 只有功能评估
                         overall_score = func_acc

@@ -42,18 +42,18 @@ def create_mysql_database_if_not_exists():
         if not result:
             # 创建数据库
             cursor.execute(f"CREATE DATABASE {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-            print(f"✅ 已自动创建数据库: {db_name}")
+            print(f"[OK] 已自动创建数据库: {db_name}")
         else:
-            print(f"✅ 数据库已存在: {db_name}")
+            print(f"[OK] 数据库已存在: {db_name}")
         
         cursor.close()
         connection.close()
         return True
     except ImportError:
-        print("⚠️  pymysql 未安装，无法自动创建数据库")
+        print("[WARNING] pymysql 未安装，无法自动创建数据库")
         return False
     except Exception as e:
-        print(f"⚠️  无法自动创建数据库: {e}")
+        print(f"[ERROR] 无法自动创建数据库: {e}")
         print("   请手动创建数据库或检查配置")
         return False
 
@@ -96,6 +96,7 @@ class User(Base):
     username = Column(String(100), unique=True, index=True, nullable=False)
     email = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
+    role = Column(String(20), default="user", nullable=False)  # 角色：admin 或 user
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -109,6 +110,32 @@ class ApiKey(Base):
     name = Column(String(100), nullable=False)  # 密钥名称（用户自定义）
     encrypted_key = Column(String(500), nullable=False)  # 加密后的API密钥
     is_default = Column(Integer, default=0)  # 是否为默认密钥（0=否，1=是）
+    is_admin_key = Column(Integer, default=0)  # 是否为管理员添加的密钥（0=否，1=是），所有用户可见
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# 评估体系配置模型
+class EvaluationConfig(Base):
+    __tablename__ = "evaluation_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # 基础指标权重
+    base_weight = Column(String(50), default="0.8")  # 基础指标权重（80%）
+    generalization_weight = Column(String(50), default="0.2")  # 通用化指标权重（20%）
+    # 通用化指标内部权重
+    adaptivity_weight = Column(String(50), default="0.3")  # 适应性权重（30%）
+    robustness_weight = Column(String(50), default="0.3")  # 鲁棒性权重（30%）
+    portability_weight = Column(String(50), default="0.2")  # 可移植性权重（20%）
+    collaboration_weight = Column(String(50), default="0.2")  # 协作效率权重（20%）
+    # 功能评估和安全评估权重
+    func_weight = Column(String(50), default="0.7")  # 功能评估权重（70%）
+    safety_weight = Column(String(50), default="0.3")  # 安全评估权重（30%）
+    # 其他系数
+    ground_truth_total = Column(Integer, default=None)  # 真实正例总数
+    total_scene_types = Column(Integer, default=None)  # 场景类型总数
+    baseline_single_task_time = Column(String(50), default=None)  # 单主体基准耗时
+    baseline_adaptation_cost = Column(String(50), default=None)  # 基准适配成本
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

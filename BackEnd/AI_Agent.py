@@ -318,22 +318,39 @@ class FeatureMetricsCalculator:
         passed_cases = sum(1 for item in results if item.get("passed"))
         total_time = sum(item.get("duration", 0.0) or 0.0 for item in results)
 
-        precision = passed_cases / total_cases if total_cases else None
-        ground_truth_total = self.config.get("ground_truth_total") or total_cases
-        recall = passed_cases / ground_truth_total if ground_truth_total else None
-        if precision is not None and recall is not None and (precision + recall) > 0:
-            f1 = 2 * precision * recall / (precision + recall)
+        # 改进的准确率计算：正确输出结果数 / 总输出结果数
+        # 注意：这里precision就是准确率（accuracy）
+        accuracy = passed_cases / total_cases if total_cases else None
+        
+        # 改进的召回率计算：成功识别的正确结果数 / 数据集中所有真实正确结果数
+        # ground_truth_total 应该是数据集中所有真实正确结果的总数
+        ground_truth_total = self.config.get("ground_truth_total")
+        if ground_truth_total is None or ground_truth_total <= 0:
+            # 如果没有提供ground_truth_total，使用总用例数作为默认值
+            # 这种情况下召回率等于准确率
+            ground_truth_total = total_cases
+        
+        recall = passed_cases / ground_truth_total if ground_truth_total > 0 else None
+        
+        # 改进的F1值计算：准确率与召回率的调和平均数
+        # F1 = 2 * (准确率 * 召回率) / (准确率 + 召回率)
+        if accuracy is not None and recall is not None and (accuracy + recall) > 0:
+            f1 = 2 * accuracy * recall / (accuracy + recall)
         else:
             f1 = None
 
+        # 任务完成率：成功完整完成任务的次数 / 总任务执行次数
+        task_completion_rate = accuracy  # 任务完成率在基础指标中等于准确率
+        
+        # 平均耗时：总任务执行时间 / 任务执行次数
         average_time = total_time / total_cases if total_cases else None
 
         if "basic" in self.features:
             metrics["basic"] = {
-                "accuracy": self._to_percentage(precision),
+                "accuracy": self._to_percentage(accuracy),
                 "recall": self._to_percentage(recall),
                 "f1_score": self._to_percentage(f1),
-                "task_completion_rate": self._to_percentage(precision),
+                "task_completion_rate": self._to_percentage(task_completion_rate),
                 "average_response_time": round(average_time, 3) if average_time is not None else None,
                 "total_cases": total_cases,
                 "passed_cases": passed_cases,
@@ -346,7 +363,94 @@ class FeatureMetricsCalculator:
             if generalization:
                 metrics["generalization"] = generalization
 
+        # 计算指标关联分析
+        if "basic" in metrics and metrics["basic"]:
+            metrics["correlation_analysis"] = self._compute_correlation_analysis(results, metrics)
+        
         return metrics
+
+    def _compute_correlation_analysis(
+        self, results: List[Dict[str, Any]], metrics: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """计算指标关联分析"""
+        correlation: Dict[str, Any] = {}
+        
+        if not results:
+            return correlation
+        
+        basic_metrics = metrics.get("basic", {})
+        generalization_metrics = metrics.get("generalization", {})
+        
+        # 1. 准确率与其他指标的关系
+        accuracy = basic_metrics.get("accuracy")
+        if accuracy is not None:
+            # 准确率与任务完成率的关系（应该高度相关）
+            task_completion_rate = basic_metrics.get("task_completion_rate")
+            if task_completion_rate is not None:
+                correlation["accuracy_task_completion_correlation"] = round(
+                    abs(accuracy - task_completion_rate) / 100.0, 4
+                )  # 差异越小，相关性越高
+        
+        # 2. F1值与准确率、召回率的关系
+        f1_score = basic_metrics.get("f1_score")
+        if f1_score is not None and accuracy is not None:
+            recall = basic_metrics.get("recall")
+            if recall is not None:
+                # F1值应该介于准确率和召回率之间
+                avg_precision_recall = (accuracy + recall) / 2
+                correlation["f1_balance"] = round(
+                    abs(f1_score - avg_precision_recall) / 100.0, 4
+                )  # 差异越小，平衡性越好
+        
+        # 3. 响应时间与准确率的关系
+        avg_response_time = basic_metrics.get("average_response_time")
+        if avg_response_time is not None and accuracy is not None:
+            # 分析响应时间与准确率的关系
+            # 通常响应时间越长，准确率可能越高（但这不是绝对的）
+            time_accuracy_pairs = [
+                (item.get("duration", 0), 1 if item.get("passed") else 0)
+                for item in results
+                if item.get("duration") is not None
+            ]
+            if time_accuracy_pairs:
+                # 计算时间与准确率的相关系数（简化版）
+                fast_cases = [acc for time, acc in time_accuracy_pairs if time < avg_response_time]
+                slow_cases = [acc for time, acc in time_accuracy_pairs if time >= avg_response_time]
+                if fast_cases and slow_cases:
+                    fast_accuracy = sum(fast_cases) / len(fast_cases) if fast_cases else 0
+                    slow_accuracy = sum(slow_cases) / len(slow_cases) if slow_cases else 0
+                    correlation["time_accuracy_tradeoff"] = {
+                        "fast_cases_accuracy": round(fast_accuracy * 100, 2),
+                        "slow_cases_accuracy": round(slow_accuracy * 100, 2),
+                        "difference": round(abs(fast_accuracy - slow_accuracy) * 100, 2),
+                    }
+        
+        # 4. 通用化指标与基础指标的关系
+        if generalization_metrics:
+            adaptivity = generalization_metrics.get("adaptivity", {})
+            if adaptivity:
+                train_rate = adaptivity.get("train_completion_rate")
+                non_train_rate = adaptivity.get("non_train_completion_rate")
+                if train_rate is not None and non_train_rate is not None and accuracy is not None:
+                    # 训练场景准确率与整体准确率的关系
+                    correlation["adaptivity_consistency"] = {
+                        "train_vs_overall": round(abs(train_rate - accuracy) / 100.0, 4),
+                        "non_train_vs_overall": round(abs(non_train_rate - accuracy) / 100.0, 4),
+                    }
+            
+            robustness = generalization_metrics.get("robustness", {})
+            if robustness:
+                abnormal_error_rate = robustness.get("abnormal_input_error_rate")
+                if abnormal_error_rate is not None and accuracy is not None:
+                    # 异常输入下的表现与正常表现的差异
+                    normal_accuracy = accuracy
+                    abnormal_accuracy = 100 - abnormal_error_rate if abnormal_error_rate is not None else None
+                    if abnormal_accuracy is not None:
+                        correlation["robustness_impact"] = round(
+                            abs(normal_accuracy - abnormal_accuracy) / 100.0, 4
+                        )
+        
+        return correlation
 
     def _compute_generalization_metrics(
         self, results: List[Dict[str, Any]], enabled_features: set
@@ -430,20 +534,39 @@ class FeatureMetricsCalculator:
         scene_metadata: Dict[str, List[Dict[str, Any]]],
         unknown_adapt_times: List[float],
     ) -> Dict[str, Any]:
-        train_rate = self._pass_rate(scene_groups.get("train", []))
-        non_train_rate = self._pass_rate(scene_groups.get("non_train", []))
+        # 训练场景任务完成率
+        train_cases = scene_groups.get("train", [])
+        train_rate = self._pass_rate(train_cases)
+        
+        # 非训练场景任务完成率
+        non_train_cases = scene_groups.get("non_train", [])
+        non_train_rate = self._pass_rate(non_train_cases)
 
+        # 跨场景任务完成率偏差：非训练场景任务完成率 - 训练场景任务完成率
         deviation = None
         if train_rate is not None and non_train_rate is not None:
             deviation = non_train_rate - train_rate
 
+        # 场景覆盖度：可有效适配的场景类型数 / 总测试场景类型数
         unique_scene_types = list(scene_groups.keys())
         total_scene_types = self.config.get("total_scene_types")
-        if total_scene_types:
+        scene_coverage_percent = None
+        if total_scene_types and total_scene_types > 0:
             scene_coverage = len(unique_scene_types) / total_scene_types
             scene_coverage_percent = self._to_percentage(scene_coverage)
-        else:
-            scene_coverage_percent = None
+        elif unique_scene_types:
+            # 如果没有提供总场景类型数，使用已覆盖的场景数作为参考
+            scene_coverage_percent = self._to_percentage(1.0)  # 假设已覆盖所有测试场景
+
+        # 未知场景适配耗时：从首次接触未知场景到任务完成率稳定≥80% 的时间
+        # 这里简化为所有未知场景的平均适配时间
+        unknown_scene_adaptation_time = None
+        if unknown_adapt_times:
+            unknown_scene_adaptation_time = round(self._safe_mean(unknown_adapt_times), 3)
+        
+        # 计算未知场景的任务完成率（用于判断是否达到稳定≥80%）
+        unknown_cases = scene_groups.get("unknown", [])
+        unknown_completion_rate = self._pass_rate(unknown_cases)
 
         adaptivity = {
             "train_completion_rate": self._to_percentage(train_rate),
@@ -451,9 +574,8 @@ class FeatureMetricsCalculator:
             "cross_scene_completion_deviation": round(deviation, 4) if deviation is not None else None,
             "scene_coverage": scene_coverage_percent,
             "covered_scene_types": unique_scene_types,
-            "unknown_scene_adaptation_time": round(self._safe_mean(unknown_adapt_times), 3)
-            if unknown_adapt_times
-            else None,
+            "unknown_scene_adaptation_time": unknown_scene_adaptation_time,
+            "unknown_scene_completion_rate": self._to_percentage(unknown_completion_rate),
         }
 
         # 额外记录原始元数据计数，便于排查
@@ -467,23 +589,41 @@ class FeatureMetricsCalculator:
         normal_concurrency_cases: List[Dict[str, Any]],
         unstable_env_cases: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        # 异常输入错误率：输入错误指令/噪声数据时的错误输出数 / 总输出数
         abnormal_pass_rate = self._pass_rate(abnormal_cases)
         abnormal_error_rate = None
         if abnormal_pass_rate is not None:
             abnormal_error_rate = 1 - abnormal_pass_rate
 
+        # 高并发稳定性：1 - (并发峰值时任务完成率 / 正常并发任务完成率)
         high_concurrency_rate = self._pass_rate(high_concurrency_cases)
-        normal_concurrency_rate = self._pass_rate(
-            [case for case in normal_concurrency_cases if case not in high_concurrency_cases]
-        )
+        # 确保normal_concurrency_cases不包含high_concurrency_cases
+        normal_only_cases = [case for case in normal_concurrency_cases if case not in high_concurrency_cases]
+        normal_concurrency_rate = self._pass_rate(normal_only_cases)
+        
         concurrency_stability = None
         if high_concurrency_rate is not None and normal_concurrency_rate not in (None, 0):
-            concurrency_stability = 1 - self._safe_ratio(high_concurrency_rate, normal_concurrency_rate)
+            # 高并发稳定性 = 1 - (高并发完成率 / 正常并发完成率)
+            # 值越大表示稳定性越好（高并发时性能下降越小）
+            concurrency_stability = 1 - (high_concurrency_rate / normal_concurrency_rate)
+        elif high_concurrency_rate is not None:
+            # 如果没有正常并发数据，使用高并发完成率作为参考
+            concurrency_stability = high_concurrency_rate
 
+        # 环境波动容错率：1 - (算力/网络波动时的超时任务数 / 总任务数)
         unstable_env_rate = self._pass_rate(unstable_env_cases)
         environment_tolerance = None
         if unstable_env_rate is not None:
-            environment_tolerance = unstable_env_rate
+            # 环境波动容错率 = 环境不稳定时的任务完成率
+            # 也可以计算为：1 - 超时任务率（如果有超时标记）
+            timeout_count = sum(1 for case in unstable_env_cases 
+                              if case.get("metadata", {}).get("timeout", False))
+            total_unstable = len(unstable_env_cases)
+            if total_unstable > 0:
+                timeout_rate = timeout_count / total_unstable
+                environment_tolerance = 1 - timeout_rate
+            else:
+                environment_tolerance = unstable_env_rate
 
         return {
             "abnormal_input_error_rate": self._to_percentage(abnormal_error_rate),
@@ -492,6 +632,8 @@ class FeatureMetricsCalculator:
             "abnormal_case_count": len(abnormal_cases),
             "high_concurrency_case_count": len(high_concurrency_cases),
             "environment_unstable_case_count": len(unstable_env_cases),
+            "normal_concurrency_completion_rate": self._to_percentage(normal_concurrency_rate),
+            "high_concurrency_completion_rate": self._to_percentage(high_concurrency_rate),
         }
 
     def _compute_portability(self, deployment_cases: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -511,24 +653,36 @@ class FeatureMetricsCalculator:
 
         for case in deployment_cases:
             metadata = case.get("metadata") or {}
+            # 跨环境部署成功率：目标环境首次部署即正常运行的次数 / 总部署次数
             if metadata.get("deployment_success"):
                 success_count += 1
+            # 兼容性问题数：迁移后出现的硬件/软件兼容性错误次数
             compatibility_issues += metadata.get("compatibility_issues", 0)
+            # 适配成本：迁移所需人力/时间成本
             cost = metadata.get("adaptation_cost")
             if isinstance(cost, (int, float)):
                 adaptation_costs.append(cost)
+            # 兼容性清单覆盖率：工具生成的兼容性清单覆盖目标环境关键配置的数量 / 目标环境关键配置总数
             coverage = metadata.get("compatibility_coverage")
             if isinstance(coverage, (int, float)):
                 coverage_values.append(coverage)
 
+        # 跨环境部署成功率
         success_rate = success_count / len(deployment_cases) if deployment_cases else None
+        
+        # 适配成本系数：迁移所需人力/时间成本 / 原部署成本
         average_cost = self._safe_mean(adaptation_costs)
         baseline_cost = self.config.get("baseline_adaptation_cost")
-        if average_cost is not None and baseline_cost:
-            adaptation_cost_ratio = average_cost / baseline_cost
-        else:
-            adaptation_cost_ratio = average_cost
+        adaptation_cost_ratio = None
+        if average_cost is not None:
+            if baseline_cost and baseline_cost > 0:
+                # 有基准成本，计算比率
+                adaptation_cost_ratio = average_cost / baseline_cost
+            else:
+                # 没有基准成本，直接使用平均成本（需要用户提供单位说明）
+                adaptation_cost_ratio = average_cost
 
+        # 兼容性清单覆盖率
         coverage_percent = None
         if coverage_values:
             coverage_percent = self._to_percentage(self._safe_mean(coverage_values))
@@ -539,6 +693,7 @@ class FeatureMetricsCalculator:
             "adaptation_cost_ratio": round(adaptation_cost_ratio, 4) if adaptation_cost_ratio is not None else None,
             "compatibility_coverage": coverage_percent,
             "deployment_attempts": len(deployment_cases),
+            "average_adaptation_cost": round(average_cost, 2) if average_cost is not None else None,
         }
 
     def _compute_collaboration(
@@ -556,8 +711,11 @@ class FeatureMetricsCalculator:
                 "collaboration_case_count": 0,
             }
 
+        # 信息交互准确率：智能体向协同对象传递的正确信息数 / 总传递信息数
+        # 这里简化为协作任务的整体通过率
         info_accuracy = self._pass_rate(collaboration_cases)
 
+        # 协同任务耗时差值：多主体协同完成任务的总时间 - 单主体完成同一任务的时间
         avg_collab_time = self._safe_mean(collaboration_durations)
         baseline_time = self._safe_mean(collaboration_baselines)
         time_delta = None
@@ -565,8 +723,10 @@ class FeatureMetricsCalculator:
             if baseline_time is not None:
                 time_delta = avg_collab_time - baseline_time
             else:
+                # 如果没有基准时间，使用协作时间本身（需要用户提供单位说明）
                 time_delta = avg_collab_time
 
+        # 协同贡献度：Σ(智能体完成的子任务占比 × 子任务重要性权重)
         contribution = None
         if contribution_scores:
             contribution = sum(contribution_scores)
@@ -576,6 +736,8 @@ class FeatureMetricsCalculator:
             "collaboration_time_delta": round(time_delta, 3) if time_delta is not None else None,
             "collaboration_contribution": round(contribution, 4) if contribution is not None else None,
             "collaboration_case_count": len(collaboration_cases),
+            "average_collaboration_time": round(avg_collab_time, 3) if avg_collab_time is not None else None,
+            "baseline_single_agent_time": round(baseline_time, 3) if baseline_time is not None else None,
         }
 
 

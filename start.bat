@@ -20,7 +20,7 @@ if not exist "BackEnd\.venv" (
     echo.
     echo 请先创建虚拟环境：
     echo   cd BackEnd
-    echo   python -m venv .venv
+    echo   python -m veimage.pngnv .venv
     echo   .venv\Scripts\activate
     echo   pip install -r requirements.txt
     echo.
