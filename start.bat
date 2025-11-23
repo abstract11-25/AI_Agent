@@ -37,6 +37,33 @@ if not exist "BackEnd\.venv\Scripts\activate.bat" (
 
 echo [OK] 后端虚拟环境检查通过
 
+:: 检查 MySQL 服务（如果使用 MySQL）
+echo 检查数据库配置
+cd BackEnd
+if exist ".env" (
+    findstr /C:"DB_DRIVER=mysql" .env >nul 2>&1
+    if not errorlevel 1 (
+        echo 检测到 MySQL 配置，正在检查 MySQL 服务...
+        :: 尝试连接 MySQL 测试服务是否运行
+        call .venv\Scripts\python.exe -c "import pymysql; import os; from dotenv import load_dotenv; load_dotenv(); pymysql.connect(host=os.getenv('DB_HOST', '127.0.0.1'), port=int(os.getenv('DB_PORT', '3306')), user=os.getenv('DB_USER', 'root'), password=os.getenv('DB_PASSWORD', ''), connect_timeout=2).close()" >nul 2>&1
+        if errorlevel 1 (
+            echo [警告] MySQL 服务未运行或无法连接
+            echo.
+            echo 请先启动 MySQL 服务：
+            echo   方法1: 运行 BackEnd\start_mysql.bat（推荐）
+            echo   方法2: 在服务管理器中启动 MySQL 服务
+            echo   方法3: 以管理员身份运行: net start MySQL
+            echo   方法4: 使用 MySQL Workbench 启动
+            echo.
+            echo 或者按任意键继续（如果 MySQL 服务已在后台运行）
+            pause >nul
+        ) else (
+            echo [OK] MySQL 服务连接正常
+        )
+    )
+)
+cd ..
+
 :: 检查uvicorn是否安装
 echo 检查依赖安装情况
 cd BackEnd

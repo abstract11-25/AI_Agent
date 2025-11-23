@@ -13,7 +13,12 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 24 * 60  # 30天过期
 
 # 密码加密上下文
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# 使用 bcrypt 作为主要方案，同时支持自动检测旧格式
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__rounds=12  # 设置 bcrypt 轮数（默认是12，可以调整）
+)
 
 # OAuth2密码流（注意：FastAPI的OAuth2PasswordRequestForm需要form-data格式）
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")

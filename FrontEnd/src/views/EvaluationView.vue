@@ -37,8 +37,8 @@
             </div>
           </template>
 
-          <el-scrollbar max-height="calc(100vh - 220px)">
-          <el-form :model="form" label-width="110px">
+          <el-scrollbar max-height="calc(100vh - 220px)" class="config-scrollbar">
+          <el-form :model="form" label-width="110px" class="config-form">
             <el-collapse v-model="activeConfigSections" class="config-collapse">
               <el-collapse-item title="基础配置" name="basic">
                 <el-form-item label="服务商" required>
@@ -52,12 +52,45 @@
                   </el-select>
                 </el-form-item>
             <el-form-item label="API密钥" required>
-              <el-input
-                v-model="form.apiKey"
-                type="password"
-                    :placeholder="apiKeyPlaceholder"
-                clearable
-              />
+              <div style="display: flex; gap: 8px;">
+                <el-select
+                  v-model="apiKeyMode"
+                  style="width: 140px; flex-shrink: 0;"
+                  @change="handleApiKeyModeChange"
+                >
+                  <el-option label="已保存" value="saved" />
+                  <el-option label="手动输入" value="manual" />
+                </el-select>
+                <el-select
+                  v-if="apiKeyMode === 'saved'"
+                  v-model="selectedApiKeyId"
+                  placeholder="选择已保存的密钥"
+                  style="flex: 1;"
+                  @change="handleSavedKeyChange"
+                >
+                  <el-option
+                    v-for="key in currentProviderApiKeys"
+                    :key="key.id"
+                    :label="key.name + (key.is_default ? ' (默认)' : '')"
+                    :value="key.id"
+                  />
+                </el-select>
+                <el-input
+                  v-else
+                  v-model="apiKeyInput"
+                  type="password"
+                  :placeholder="apiKeyPlaceholder"
+                  clearable
+                  style="flex: 1;"
+                />
+                <el-button
+                  type="primary"
+                  plain
+                  @click="showApiKeyDialog = true"
+                >
+                  管理密钥
+                </el-button>
+              </div>
             </el-form-item>
                 <el-form-item label="模型名称">
                   <el-input
@@ -238,13 +271,13 @@
               </el-collapse-item>
             </el-collapse>
 
-            <el-form-item>
+            <el-form-item class="button-group">
               <!-- 新增：取消按钮，与开始按钮并排 -->
               <el-button
                 type="primary"
                 @click="startEvaluation"
                 :loading="isEvaluating"
-                :disabled="!form.apiKey || form.evaluationTypes.length === 0 || isEvaluating"
+                :disabled="isStartButtonDisabled"
               >
                 开始评估
               </el-button>
@@ -252,7 +285,6 @@
                 type="warning"
                 @click="cancelEvaluation"
                 :disabled="!isEvaluating"
-                style="margin-left: 10px;"
               >
                 取消评估
               </el-button>
@@ -378,7 +410,7 @@
             <el-col :span="6">
               <div class="stat-card">
                 <div class="stat-label">总体得分</div>
-                <div class="stat-value">{{ (evaluationSummary.summary.overall_score * 100).toFixed(1) }}%</div>
+                <div class="stat-value">{{ (evaluationSummary.summary.overall_score * 100).toFixed(2) }}</div>
               </div>
             </el-col>
             <el-col :span="6">
@@ -569,13 +601,115 @@
         </el-card>
       </el-col>
     </el-row>
+
+    <!-- API密钥管理对话框 -->
+    <el-dialog
+      v-model="showApiKeyDialog"
+      title="API密钥管理"
+      width="800px"
+      @open="loadAllApiKeys"
+      @close="handleDialogClose"
+    >
+      <el-tabs v-model="apiKeyDialogTab">
+        <el-tab-pane label="密钥列表" name="list">
+          <el-table :data="savedApiKeys" style="width: 100%" stripe>
+            <el-table-column prop="name" label="名称" width="200" />
+            <el-table-column prop="provider" label="服务商" width="120">
+              <template #default="{ row }">
+                {{ providerLabel(row.provider) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag v-if="row.is_default" type="success" size="small">默认</el-tag>
+                <span v-else style="color: #909399;">-</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="created_at" label="创建时间" width="180">
+              <template #default="{ row }">
+                {{ formatDateTime(row.created_at) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="200" fixed="right">
+              <template #default="{ row }">
+                <el-button
+                  v-if="!row.is_default"
+                  type="primary"
+                  link
+                  size="small"
+                  @click="setDefaultKey(row.id)"
+                >
+                  设为默认
+                </el-button>
+                <el-button
+                  type="danger"
+                  link
+                  size="small"
+                  @click="deleteKey(row.id)"
+                >
+                  删除
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty
+            v-if="savedApiKeys.length === 0"
+            description="暂无已保存的密钥"
+            :image-size="100"
+          />
+        </el-tab-pane>
+        <el-tab-pane label="添加密钥" name="add">
+          <el-form
+            :model="newApiKeyForm"
+            label-width="120px"
+            style="max-width: 600px; margin-top: 20px;"
+          >
+            <el-form-item label="服务商" required>
+              <el-select v-model="newApiKeyForm.provider" placeholder="选择服务商">
+                <el-option
+                  v-for="item in providerOptions.filter(p => p.value !== 'custom')"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="密钥名称" required>
+              <el-input
+                v-model="newApiKeyForm.name"
+                placeholder="例如：我的OpenAI密钥"
+                clearable
+              />
+            </el-form-item>
+            <el-form-item label="API密钥" required>
+              <el-input
+                v-model="newApiKeyForm.api_key"
+                type="password"
+                placeholder="请输入API密钥"
+                show-password
+                clearable
+              />
+            </el-form-item>
+            <el-form-item>
+              <el-checkbox v-model="newApiKeyForm.is_default">
+                设为该服务商的默认密钥
+              </el-checkbox>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" @click="addApiKey">添加</el-button>
+              <el-button @click="resetNewApiKeyForm">重置</el-button>
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+      </el-tabs>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { User, ArrowDown } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import { useUserStore } from '../stores/user'
@@ -700,6 +834,15 @@ interface CollaborationMetrics {
   collaboration_case_count?: number
 }
 
+interface ApiKeyInfo {
+  id: number
+  provider: string
+  name: string
+  is_default: boolean
+  created_at: string
+  updated_at: string
+}
+
 // 2. 状态管理（新增任务ID存储）
 const featureOptions = [
   { value: 'basic', label: '基础指标' },
@@ -783,6 +926,20 @@ const form: FormData = reactive({
   customTestCases: null
 })
 
+// API密钥管理相关状态
+const apiKeyMode = ref<'saved' | 'manual'>('saved')
+const selectedApiKeyId = ref<number | null>(null)
+const apiKeyInput = ref('')
+const savedApiKeys = ref<ApiKeyInfo[]>([])
+const showApiKeyDialog = ref(false)
+const apiKeyDialogTab = ref<'list' | 'add'>('list')
+const newApiKeyForm = reactive({
+  provider: 'zhipu',
+  name: '',
+  api_key: '',
+  is_default: false
+})
+
 const providerPresetMap = providerOptions.reduce<Record<string, ProviderOption>>((acc, option) => {
   acc[option.value] = option
   return acc
@@ -803,13 +960,50 @@ const apiKeyPlaceholder = computed(() => {
   return option.placeholder || `请输入 ${option.label} API Key`
 })
 
+// 当前服务商的已保存密钥
+const currentProviderApiKeys = computed(() => {
+  return savedApiKeys.value.filter(k => k.provider === form.provider)
+})
+
+// 检查是否有有效的API密钥
+const hasValidApiKey = computed(() => {
+  if (apiKeyMode.value === 'saved') {
+    return selectedApiKeyId.value !== null || currentProviderApiKeys.value.length > 0
+  } else {
+    return !!apiKeyInput.value
+  }
+})
+
+// 开始评估按钮是否禁用
+const isStartButtonDisabled = computed(() => {
+  return !hasValidApiKey.value || form.evaluationTypes.length === 0 || isEvaluating.value
+})
+
 watch(
   () => form.provider,
-  (newProvider) => {
+  async (newProvider) => {
     const newPreset = providerPresetMap[newProvider]
     if (newPreset) {
       form.baseUrl = newPreset.baseUrl ?? ''
       form.model = newPreset.model ?? ''
+    }
+    // 加载该服务商的密钥列表
+    await loadApiKeys(newProvider)
+    // 自动选择默认密钥（只考虑当前服务商的密钥）
+    const providerKeys = savedApiKeys.value.filter(k => k.provider === newProvider)
+    const defaultKey = providerKeys.find(k => k.is_default)
+    if (defaultKey) {
+      selectedApiKeyId.value = defaultKey.id
+      apiKeyMode.value = 'saved'
+    } else if (providerKeys.length > 0) {
+      // 如果没有默认密钥，选择第一个
+      selectedApiKeyId.value = providerKeys[0].id
+      apiKeyMode.value = 'saved'
+    } else {
+      // 如果没有已保存的密钥，切换到手动输入
+      apiKeyMode.value = 'manual'
+      selectedApiKeyId.value = null
+      apiKeyInput.value = ''
     }
   },
   { immediate: true }
@@ -928,34 +1122,71 @@ const startEvaluation = async () => {
     return
   }
 
-  const agentPayload: Record<string, any> = {
-    provider: form.provider,
-      api_key: form.apiKey,
-    model: form.model || undefined,
-    base_url: form.baseUrl || undefined,
-    temperature: form.temperature,
-    max_tokens: form.maxTokens,
-    timeout: form.timeout,
-    max_retries: form.maxRetries
-  }
+  // 确定使用的API密钥
+  let apiKeyToUse: string | undefined = undefined
+  let apiKeyIdToUse: number | undefined = undefined
 
-  if (!agentPayload.model) {
-    delete agentPayload.model
-  }
-  if (!agentPayload.base_url) {
-    delete agentPayload.base_url
-  }
-  if (extraHeaders) {
-    agentPayload.extra_headers = extraHeaders
-  }
-  if (extraBody) {
-    agentPayload.extra_body = extraBody
+  if (apiKeyMode.value === 'saved' && selectedApiKeyId.value) {
+    // 使用已保存的密钥ID
+    apiKeyIdToUse = selectedApiKeyId.value
+  } else if (apiKeyMode.value === 'manual' && apiKeyInput.value) {
+    // 使用手动输入的密钥
+    apiKeyToUse = apiKeyInput.value
+  } else {
+    // 如果没有选择密钥，检查是否有默认密钥
+    const defaultKey = savedApiKeys.value.find(k => k.is_default && k.provider === form.provider)
+    if (!defaultKey) {
+      ElMessage.error('请选择或输入API密钥')
+      isEvaluating.value = false
+      return
+    }
+    apiKeyIdToUse = defaultKey.id
   }
 
   const payload: Record<string, any> = {
-    agent: agentPayload,
-      test_case_source: form.testCaseSource,
-      evaluation_types: form.evaluationTypes
+    test_case_source: form.testCaseSource,
+    evaluation_types: form.evaluationTypes
+  }
+
+  // 根据后端逻辑：如果使用api_key_id，不发送agent对象，而是在顶层发送参数
+  // 如果使用api_key，发送agent对象
+  if (apiKeyIdToUse) {
+    // 使用api_key_id时，在顶层发送参数，不发送agent对象
+    payload.api_key_id = apiKeyIdToUse
+    payload.provider = form.provider
+    if (form.model) payload.model = form.model
+    if (form.baseUrl) payload.base_url = form.baseUrl
+    payload.temperature = form.temperature
+    payload.max_tokens = form.maxTokens
+    payload.timeout = form.timeout
+    payload.max_retries = form.maxRetries
+    if (extraHeaders) payload.extra_headers = extraHeaders
+    if (extraBody) payload.extra_body = extraBody
+  } else if (apiKeyToUse) {
+    // 使用api_key时，发送agent对象
+    const agentPayload: Record<string, any> = {
+      provider: form.provider,
+      api_key: apiKeyToUse,
+      model: form.model || undefined,
+      base_url: form.baseUrl || undefined,
+      temperature: form.temperature,
+      max_tokens: form.maxTokens,
+      timeout: form.timeout,
+      max_retries: form.maxRetries
+    }
+    if (!agentPayload.model) {
+      delete agentPayload.model
+    }
+    if (!agentPayload.base_url) {
+      delete agentPayload.base_url
+    }
+    if (extraHeaders) {
+      agentPayload.extra_headers = extraHeaders
+    }
+    if (extraBody) {
+      agentPayload.extra_body = extraBody
+    }
+    payload.agent = agentPayload
   }
 
   if (form.testCaseSource === 'custom' && form.customTestCases) {
@@ -985,10 +1216,11 @@ const startEvaluation = async () => {
     // 调用后端启动评估接口
     const response = await request.post('/api/evaluate', payload)
     taskId.value = response.data.task_id  // 保存任务ID
+    // 从form中获取agent信息（无论使用哪种方式）
     agentInfo.value = {
-      provider: agentPayload.provider,
-      model: agentPayload.model,
-      base_url: agentPayload.base_url
+      provider: form.provider,
+      model: form.model || undefined,
+      base_url: form.baseUrl || undefined
     }
 
     // 轮询获取评估进度（新增：处理"取消"状态）
@@ -1072,11 +1304,177 @@ const handleCommand = (command: string) => {
   }
 }
 
-// 组件挂载时获取用户信息
+// API密钥管理相关函数
+const loadApiKeys = async (provider?: string) => {
+  try {
+    const providerParam = provider || form.provider
+    const response = await request.get('/api/apikeys', {
+      params: { provider: providerParam }
+    })
+    // 如果指定了provider，合并该provider的密钥；否则替换所有密钥
+    if (providerParam && savedApiKeys.value.length > 0) {
+      // 移除该provider的旧密钥，添加新密钥
+      savedApiKeys.value = savedApiKeys.value.filter(k => k.provider !== providerParam)
+      savedApiKeys.value.push(...response.data)
+    } else {
+      // 加载所有密钥或首次加载
+      savedApiKeys.value = response.data
+    }
+  } catch (error: any) {
+    console.error('加载API密钥列表失败:', error)
+    // 如果失败，清空列表
+    if (!provider) {
+      savedApiKeys.value = []
+    }
+  }
+}
+
+// 加载所有密钥（用于对话框）
+const loadAllApiKeys = async () => {
+  try {
+    const response = await request.get('/api/apikeys')
+    savedApiKeys.value = response.data
+  } catch (error: any) {
+    console.error('加载所有API密钥列表失败:', error)
+  }
+}
+
+const handleApiKeyModeChange = () => {
+  if (apiKeyMode.value === 'saved') {
+    // 切换到已保存模式时，如果有默认密钥则选择它（只考虑当前服务商）
+    const providerKeys = currentProviderApiKeys.value
+    const defaultKey = providerKeys.find(k => k.is_default)
+    if (defaultKey) {
+      selectedApiKeyId.value = defaultKey.id
+    } else if (providerKeys.length > 0) {
+      selectedApiKeyId.value = providerKeys[0].id
+    } else {
+      selectedApiKeyId.value = null
+    }
+  } else {
+    // 切换到手动输入模式
+    selectedApiKeyId.value = null
+  }
+}
+
+const handleSavedKeyChange = () => {
+  // 选择已保存密钥时，清空手动输入
+  apiKeyInput.value = ''
+}
+
+const addApiKey = async () => {
+  if (!newApiKeyForm.provider || !newApiKeyForm.name || !newApiKeyForm.api_key) {
+    ElMessage.warning('请填写完整信息')
+    return
+  }
+
+  try {
+    await request.post('/api/apikeys', {
+      provider: newApiKeyForm.provider,
+      name: newApiKeyForm.name,
+      api_key: newApiKeyForm.api_key,
+      is_default: newApiKeyForm.is_default
+    })
+    ElMessage.success('密钥添加成功')
+    resetNewApiKeyForm()
+    // 重新加载密钥列表
+    await loadApiKeys(newApiKeyForm.provider)
+    // 如果添加的是当前服务商的密钥，自动选择它
+    if (newApiKeyForm.provider === form.provider) {
+      const newKey = savedApiKeys.value.find(k => k.name === newApiKeyForm.name && k.provider === form.provider)
+      if (newKey) {
+        selectedApiKeyId.value = newKey.id
+        apiKeyMode.value = 'saved'
+      }
+    }
+    apiKeyDialogTab.value = 'list'
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '添加密钥失败')
+  }
+}
+
+const setDefaultKey = async (keyId: number) => {
+  try {
+    await request.post(`/api/apikeys/${keyId}/set-default`)
+    ElMessage.success('已设置为默认密钥')
+    // 重新加载密钥列表
+    await loadApiKeys(form.provider)
+    // 如果设置的是当前服务商的密钥，自动选择它
+    const updatedKey = savedApiKeys.value.find(k => k.id === keyId)
+    if (updatedKey && updatedKey.provider === form.provider) {
+      selectedApiKeyId.value = keyId
+      apiKeyMode.value = 'saved'
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '设置默认密钥失败')
+  }
+}
+
+const deleteKey = async (keyId: number) => {
+  try {
+    await ElMessageBox.confirm('确定要删除这个密钥吗？', '确认删除', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    await request.delete(`/api/apikeys/${keyId}`)
+    ElMessage.success('密钥已删除')
+    // 重新加载密钥列表
+    await loadApiKeys(form.provider)
+    // 如果删除的是当前选中的密钥，切换到手动输入或选择其他密钥
+    if (selectedApiKeyId.value === keyId) {
+      const remainingKeys = savedApiKeys.value.filter(k => k.provider === form.provider)
+      if (remainingKeys.length > 0) {
+        const defaultKey = remainingKeys.find(k => k.is_default)
+        selectedApiKeyId.value = defaultKey ? defaultKey.id : remainingKeys[0].id
+      } else {
+        apiKeyMode.value = 'manual'
+        selectedApiKeyId.value = null
+        apiKeyInput.value = ''
+      }
+    }
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.response?.data?.detail || '删除密钥失败')
+    }
+  }
+}
+
+const resetNewApiKeyForm = () => {
+  newApiKeyForm.provider = form.provider
+  newApiKeyForm.name = ''
+  newApiKeyForm.api_key = ''
+  newApiKeyForm.is_default = false
+}
+
+const handleDialogClose = () => {
+  apiKeyDialogTab.value = 'list'
+  resetNewApiKeyForm()
+}
+
+const formatDateTime = (dateStr: string) => {
+  if (!dateStr) return '-'
+  try {
+    const date = new Date(dateStr)
+    return date.toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  } catch {
+    return dateStr
+  }
+}
+
+// 组件挂载时获取用户信息和加载密钥列表
 onMounted(async () => {
   if (userStore.isLoggedIn && !userStore.user) {
     await userStore.fetchUserInfo()
   }
+  // 加载当前服务商的密钥列表
+  await loadApiKeys()
 })
 </script>
 
@@ -1154,6 +1552,69 @@ onMounted(async () => {
   top: 24px;
 }
 
+/* 配置区域滚动条样式 */
+.config-scrollbar :deep(.el-scrollbar__wrap) {
+  padding: 20px 20px 20px 20px;
+  margin-right: 0;
+}
+
+.config-scrollbar :deep(.el-scrollbar__view) {
+  padding-right: 8px;
+}
+
+.config-scrollbar :deep(.el-scrollbar__bar) {
+  right: 8px;
+}
+
+.config-scrollbar :deep(.el-scrollbar__thumb) {
+  background-color: rgba(64, 158, 255, 0.3);
+  border-radius: 4px;
+}
+
+.config-scrollbar :deep(.el-scrollbar__thumb:hover) {
+  background-color: rgba(64, 158, 255, 0.5);
+}
+
+/* 按钮组样式 */
+.button-group {
+  margin-top: 20px;
+  margin-bottom: 20px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(64, 158, 255, 0.1);
+}
+
+.button-group :deep(.el-form-item__content) {
+  display: flex;
+  gap: 12px;
+}
+
+.button-group :deep(.el-button) {
+  flex: 1;
+  height: 42px;
+  font-size: 15px;
+  font-weight: 500;
+  border-radius: 10px;
+  transition: all 0.3s ease;
+}
+
+.button-group :deep(.el-button--primary) {
+  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.3);
+}
+
+.button-group :deep(.el-button--primary:hover:not(:disabled)) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(64, 158, 255, 0.4);
+}
+
+.button-group :deep(.el-button--warning) {
+  box-shadow: 0 4px 12px rgba(255, 152, 0, 0.3);
+}
+
+.button-group :deep(.el-button--warning:hover:not(:disabled)) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(255, 152, 0, 0.4);
+}
+
 .config-header h2 {
   margin: 0;
   font-size: 20px;
@@ -1165,6 +1626,21 @@ onMounted(async () => {
   margin: 6px 0 0;
   color: #7a8aa0;
   font-size: 13px;
+}
+
+/* 表单样式 */
+.config-form {
+  padding: 0;
+}
+
+.config-form :deep(.el-form-item) {
+  margin-bottom: 20px;
+}
+
+.config-form :deep(.el-form-item__label) {
+  font-weight: 500;
+  color: #1f2d3d;
+  padding-right: 12px;
 }
 
 .progress-container {

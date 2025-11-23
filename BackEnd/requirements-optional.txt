@@ -1,0 +1,23 @@
+# 可选依赖说明
+# 这些依赖可能会与核心依赖产生版本冲突，但通常不影响核心功能
+# 如果不需要这些功能，可以忽略相关警告
+
+# 如果环境中安装了 langchain，需要：
+# pydantic>=2.7.4,<3.0.0
+
+# 如果环境中安装了 thinc，需要：
+# numpy>=2.0.0
+# 注意：这会与 torch 2.1.0 冲突，建议不安装 thinc 或使用更新的 torch 版本
+
+# 如果环境中安装了 evals 或 evaluate，需要：
+# datasets>=2.0.0
+
+# 解决方案：
+# 1. 如果不需要这些库，可以卸载它们：
+#    pip uninstall langchain langchain-core thinc evals evaluate
+#
+# 2. 如果需要这些库，可以考虑：
+#    - 升级 FastAPI 到更新版本（支持更新的 pydantic）
+#    - 升级 torch 到更新版本（支持 numpy 2.x）
+#    - 使用单独的虚拟环境
+

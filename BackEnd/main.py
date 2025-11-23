@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from cryptography.fernet import Fernet
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,8 +27,9 @@ from auth import (
     get_current_user,
     get_password_hash,
     verify_password,
+    pwd_context,
 )
-from database import User, get_db, init_db
+from database import User, ApiKey, get_db, init_db
 
 app = FastAPI()
 
@@ -50,6 +53,7 @@ evaluation_tasks: Dict[str, Tuple[Dict, asyncio.Event]] = {}
 # 前端请求数据模型
 class EvaluationRequest(BaseModel):
     api_key: Optional[str] = None
+    api_key_id: Optional[int] = None  # 使用已保存的API密钥ID
     provider: str = "zhipu"
     model: Optional[str] = None
     base_url: Optional[str] = None
@@ -149,7 +153,31 @@ async def login(
         (User.username == form_data.username) | (User.email == form_data.username)
     ).first()
     
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # 验证密码
+    try:
+        # 检查哈希值格式
+        if not user.hashed_password or len(user.hashed_password) < 10:
+            print(f"警告: 用户 {user.username} 的密码哈希格式异常 (长度: {len(user.hashed_password) if user.hashed_password else 0})")
+            password_valid = False
+        else:
+            password_valid = verify_password(form_data.password, user.hashed_password)
+            if not password_valid:
+                print(f"密码验证失败: 用户 {user.username}, 哈希前缀: {user.hashed_password[:20]}...")
+    except Exception as e:
+        # 如果密码验证出错，记录错误但不暴露详细信息
+        print(f"密码验证异常: 用户 {user.username}, 错误: {e}")
+        import traceback
+        traceback.print_exc()
+        password_valid = False
+    
+    if not password_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
@@ -185,6 +213,423 @@ async def get_me(current_user: User = Depends(get_current_user)):
     }
 
 
+# ==================== API 提供商相关接口 ====================
+
+class ProviderInfo(BaseModel):
+    """API提供商信息"""
+    id: str
+    name: str
+    description: str
+    default_model: Optional[str] = None
+    default_base_url: Optional[str] = None
+    requires_api_key: bool = True
+
+
+@app.get("/api/providers", response_model=List[ProviderInfo])
+async def get_providers():
+    """获取可用的API提供商列表"""
+    providers = [
+        ProviderInfo(
+            id="zhipu",
+            name="智谱AI (GLM)",
+            description="智谱AI的GLM系列模型",
+            default_model="glm-4.5-flash",
+            default_base_url="https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            requires_api_key=True
+        ),
+        ProviderInfo(
+            id="openai",
+            name="OpenAI",
+            description="OpenAI的GPT系列模型",
+            default_model="gpt-4o-mini",
+            default_base_url="https://api.openai.com/v1/chat/completions",
+            requires_api_key=True
+        ),
+        ProviderInfo(
+            id="deepseek",
+            name="DeepSeek",
+            description="DeepSeek AI模型",
+            default_model="deepseek-chat",
+            default_base_url="https://api.deepseek.com/v1/chat/completions",
+            requires_api_key=True
+        ),
+        ProviderInfo(
+            id="moonshot",
+            name="Moonshot AI",
+            description="Moonshot AI模型",
+            default_model="moonshot-v1-8k",
+            default_base_url="https://api.moonshot.cn/v1/chat/completions",
+            requires_api_key=True
+        ),
+        ProviderInfo(
+            id="yi",
+            name="零一万物 (Yi)",
+            description="零一万物的Yi系列模型",
+            default_model="yi-lightning",
+            default_base_url="https://api.lingyiwanwu.com/v1/chat/completions",
+            requires_api_key=True
+        ),
+        ProviderInfo(
+            id="qwen",
+            name="通义千问 (Qwen)",
+            description="阿里云通义千问模型",
+            default_model="qwen-plus",
+            default_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            requires_api_key=True
+        ),
+        ProviderInfo(
+            id="baichuan",
+            name="百川智能 (Baichuan)",
+            description="百川智能的Baichuan系列模型",
+            default_model="Baichuan2-Turbo",
+            default_base_url="https://api.baichuan-ai.com/v1/chat/completions",
+            requires_api_key=True
+        ),
+        ProviderInfo(
+            id="custom",
+            name="自定义API",
+            description="自定义OpenAI兼容的API端点",
+            default_model=None,
+            default_base_url=None,
+            requires_api_key=True
+        ),
+    ]
+    return providers
+
+
+# ==================== API密钥管理接口 ====================
+
+class ApiKeyCreate(BaseModel):
+    """创建API密钥请求"""
+    provider: str
+    name: str
+    api_key: str
+    is_default: bool = False
+
+
+class ApiKeyUpdate(BaseModel):
+    """更新API密钥请求"""
+    name: Optional[str] = None
+    api_key: Optional[str] = None
+    is_default: Optional[bool] = None
+
+
+class ApiKeyResponse(BaseModel):
+    """API密钥响应"""
+    id: int
+    provider: str
+    name: str
+    is_default: bool
+    created_at: str
+    updated_at: str
+
+    class Config:
+        from_attributes = True
+
+
+# API密钥加密密钥（生产环境应该从环境变量读取）
+# 优先从环境变量读取，否则从文件读取或生成新密钥
+ENCRYPTION_KEY_FILE = os.path.join(os.path.dirname(__file__), ".encryption_key")
+
+def get_or_create_encryption_key():
+    """获取或创建加密密钥，确保密钥持久化"""
+    # 1. 优先从环境变量读取
+    key = os.getenv("API_KEY_ENCRYPTION_KEY")
+    if key:
+        return key
+    
+    # 2. 从文件读取
+    if os.path.exists(ENCRYPTION_KEY_FILE):
+        try:
+            with open(ENCRYPTION_KEY_FILE, 'r', encoding='utf-8') as f:
+                key = f.read().strip()
+            if key:
+                return key
+        except Exception:
+            pass
+    
+    # 3. 生成新密钥并保存到文件
+    key = Fernet.generate_key().decode()
+    try:
+        with open(ENCRYPTION_KEY_FILE, 'w', encoding='utf-8') as f:
+            f.write(key)
+        # 设置文件权限（仅所有者可读）
+        if os.name != 'nt':  # Unix/Linux系统
+            os.chmod(ENCRYPTION_KEY_FILE, 0o600)
+    except Exception as e:
+        print(f"警告: 无法保存加密密钥到文件: {e}")
+    
+    return key
+
+API_KEY_ENCRYPTION_KEY = get_or_create_encryption_key()
+
+# 如果密钥不是32字节的base64编码，需要生成新的
+try:
+    _fernet = Fernet(API_KEY_ENCRYPTION_KEY.encode())
+except Exception:
+    # 如果密钥无效，生成新密钥（注意：这会导致已加密的数据无法解密）
+    _fernet = Fernet.generate_key()
+    API_KEY_ENCRYPTION_KEY = _fernet.decode()
+    # 保存新密钥
+    try:
+        with open(ENCRYPTION_KEY_FILE, 'w', encoding='utf-8') as f:
+            f.write(API_KEY_ENCRYPTION_KEY)
+        if os.name != 'nt':
+            os.chmod(ENCRYPTION_KEY_FILE, 0o600)
+    except Exception:
+        pass
+    _fernet = Fernet(_fernet)
+
+
+def encrypt_api_key(api_key: str) -> str:
+    """加密API密钥（使用Fernet对称加密）"""
+    return _fernet.encrypt(api_key.encode()).decode()
+
+
+def decrypt_api_key(encrypted_key: str) -> str:
+    """解密API密钥"""
+    try:
+        return _fernet.decrypt(encrypted_key.encode()).decode()
+    except Exception as e:
+        raise ValueError(f"解密API密钥失败: {str(e)}")
+
+
+@app.post("/api/apikeys", response_model=ApiKeyResponse, status_code=status.HTTP_201_CREATED)
+async def create_api_key(
+    api_key_data: ApiKeyCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """添加API密钥"""
+    # 检查是否已存在同名密钥
+    existing = db.query(ApiKey).filter(
+        ApiKey.user_id == current_user.id,
+        ApiKey.provider == api_key_data.provider,
+        ApiKey.name == api_key_data.name
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"该提供商下已存在名为 '{api_key_data.name}' 的密钥"
+        )
+    
+    # 加密API密钥
+    encrypted_key = encrypt_api_key(api_key_data.api_key)
+    
+    # 如果设置为默认，先取消其他默认密钥
+    if api_key_data.is_default:
+        db.query(ApiKey).filter(
+            ApiKey.user_id == current_user.id,
+            ApiKey.provider == api_key_data.provider,
+            ApiKey.is_default == 1
+        ).update({"is_default": 0})
+    
+    # 创建新密钥
+    db_api_key = ApiKey(
+        user_id=current_user.id,
+        provider=api_key_data.provider,
+        name=api_key_data.name,
+        encrypted_key=encrypted_key,
+        is_default=1 if api_key_data.is_default else 0
+    )
+    db.add(db_api_key)
+    db.commit()
+    db.refresh(db_api_key)
+    
+    return ApiKeyResponse(
+        id=db_api_key.id,
+        provider=db_api_key.provider,
+        name=db_api_key.name,
+        is_default=bool(db_api_key.is_default),
+        created_at=db_api_key.created_at.isoformat() if db_api_key.created_at else "",
+        updated_at=db_api_key.updated_at.isoformat() if db_api_key.updated_at else ""
+    )
+
+
+@app.get("/api/apikeys", response_model=List[ApiKeyResponse])
+async def list_api_keys(
+    provider: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取用户的API密钥列表"""
+    query = db.query(ApiKey).filter(ApiKey.user_id == current_user.id)
+    if provider:
+        query = query.filter(ApiKey.provider == provider)
+    
+    api_keys = query.order_by(ApiKey.is_default.desc(), ApiKey.created_at.desc()).all()
+    
+    return [
+        ApiKeyResponse(
+            id=key.id,
+            provider=key.provider,
+            name=key.name,
+            is_default=bool(key.is_default),
+            created_at=key.created_at.isoformat() if key.created_at else "",
+            updated_at=key.updated_at.isoformat() if key.updated_at else ""
+        )
+        for key in api_keys
+    ]
+
+
+@app.get("/api/apikeys/{key_id}", response_model=ApiKeyResponse)
+async def get_api_key(
+    key_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取单个API密钥信息"""
+    api_key = db.query(ApiKey).filter(
+        ApiKey.id == key_id,
+        ApiKey.user_id == current_user.id
+    ).first()
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API密钥不存在"
+        )
+    
+    return ApiKeyResponse(
+        id=api_key.id,
+        provider=api_key.provider,
+        name=api_key.name,
+        is_default=bool(api_key.is_default),
+        created_at=api_key.created_at.isoformat() if api_key.created_at else "",
+        updated_at=api_key.updated_at.isoformat() if api_key.updated_at else ""
+    )
+
+
+@app.put("/api/apikeys/{key_id}", response_model=ApiKeyResponse)
+async def update_api_key(
+    key_id: int,
+    api_key_data: ApiKeyUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """更新API密钥"""
+    api_key = db.query(ApiKey).filter(
+        ApiKey.id == key_id,
+        ApiKey.user_id == current_user.id
+    ).first()
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API密钥不存在"
+        )
+    
+    # 更新名称
+    if api_key_data.name is not None:
+        # 检查新名称是否与其他密钥冲突
+        existing = db.query(ApiKey).filter(
+            ApiKey.user_id == current_user.id,
+            ApiKey.provider == api_key.provider,
+            ApiKey.name == api_key_data.name,
+            ApiKey.id != key_id
+        ).first()
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"该提供商下已存在名为 '{api_key_data.name}' 的密钥"
+            )
+        api_key.name = api_key_data.name
+    
+    # 更新密钥
+    if api_key_data.api_key is not None:
+        api_key.encrypted_key = encrypt_api_key(api_key_data.api_key)
+    
+    # 更新默认状态
+    if api_key_data.is_default is not None:
+        if api_key_data.is_default:
+            # 取消同提供商的其他默认密钥
+            db.query(ApiKey).filter(
+                ApiKey.user_id == current_user.id,
+                ApiKey.provider == api_key.provider,
+                ApiKey.id != key_id,
+                ApiKey.is_default == 1
+            ).update({"is_default": 0})
+        api_key.is_default = 1 if api_key_data.is_default else 0
+    
+    api_key.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(api_key)
+    
+    return ApiKeyResponse(
+        id=api_key.id,
+        provider=api_key.provider,
+        name=api_key.name,
+        is_default=bool(api_key.is_default),
+        created_at=api_key.created_at.isoformat() if api_key.created_at else "",
+        updated_at=api_key.updated_at.isoformat() if api_key.updated_at else ""
+    )
+
+
+@app.delete("/api/apikeys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_api_key(
+    key_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """删除API密钥"""
+    api_key = db.query(ApiKey).filter(
+        ApiKey.id == key_id,
+        ApiKey.user_id == current_user.id
+    ).first()
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API密钥不存在"
+        )
+    
+    db.delete(api_key)
+    db.commit()
+    return None
+
+
+@app.post("/api/apikeys/{key_id}/set-default", response_model=ApiKeyResponse)
+async def set_default_api_key(
+    key_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """设置默认API密钥"""
+    api_key = db.query(ApiKey).filter(
+        ApiKey.id == key_id,
+        ApiKey.user_id == current_user.id
+    ).first()
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API密钥不存在"
+        )
+    
+    # 取消同提供商的其他默认密钥
+    db.query(ApiKey).filter(
+        ApiKey.user_id == current_user.id,
+        ApiKey.provider == api_key.provider,
+        ApiKey.id != key_id,
+        ApiKey.is_default == 1
+    ).update({"is_default": 0})
+    
+    # 设置当前密钥为默认
+    api_key.is_default = 1
+    api_key.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(api_key)
+    
+    return ApiKeyResponse(
+        id=api_key.id,
+        provider=api_key.provider,
+        name=api_key.name,
+        is_default=bool(api_key.is_default),
+        created_at=api_key.created_at.isoformat() if api_key.created_at else "",
+        updated_at=api_key.updated_at.isoformat() if api_key.updated_at else ""
+    )
+
+
 # 启动评估任务接口（需要登录）
 @app.post("/api/evaluate")
 async def start_evaluation(
@@ -196,11 +641,72 @@ async def start_evaluation(
     if request.agent is not None:
         agent_settings = AgentSettings(**request.agent.model_dump())
     else:
-        if not request.api_key:
+        # 获取API密钥的优先级：1.请求中的api_key 2.已保存的api_key_id 3.默认密钥 4.环境变量
+        api_key = request.api_key
+        
+        if not api_key:
+            # 需要数据库会话来查询已保存的密钥
+            db_session = next(get_db())
+            try:
+                if request.api_key_id:
+                    # 使用指定的已保存密钥
+                    saved_key = db_session.query(ApiKey).filter(
+                        ApiKey.id == request.api_key_id,
+                        ApiKey.user_id == current_user.id
+                    ).first()
+                    if not saved_key:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="指定的API密钥不存在"
+                        )
+                    try:
+                        api_key = decrypt_api_key(saved_key.encrypted_key)
+                    except Exception as e:
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"解密API密钥失败: {str(e)}"
+                        )
+                else:
+                    # 尝试使用默认密钥
+                    default_key = db_session.query(ApiKey).filter(
+                        ApiKey.user_id == current_user.id,
+                        ApiKey.provider == request.provider.lower(),
+                        ApiKey.is_default == 1
+                    ).first()
+                    if default_key:
+                        try:
+                            api_key = decrypt_api_key(default_key.encrypted_key)
+                        except Exception as e:
+                            # 如果解密失败，继续尝试其他方式
+                            pass
+            finally:
+                db_session.close()
+        
+        if not api_key:
+            # 尝试从环境变量获取
+            env_key_map = {
+                "zhipu": "ZHIPU_API_KEY",
+                "glm": "ZHIPU_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "deepseek": "DEEPSEEK_API_KEY",
+                "moonshot": "MOONSHOT_API_KEY",
+                "yi": "YI_API_KEY",
+                "qwen": "QWEN_API_KEY",
+                "dashscope": "DASHSCOPE_API_KEY",
+                "baichuan": "BAICHUAN_API_KEY",
+            }
+            env_key = env_key_map.get(request.provider.lower())
+            if env_key:
+                api_key = os.getenv(env_key)
+            if not api_key:
+                api_key = os.getenv("API_KEY")
+        
+        if not api_key:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="缺少api_key参数"
+                detail=f"缺少api_key参数。请提供api_key，或设置环境变量 {env_key_map.get(request.provider.lower(), 'API_KEY')}"
             )
+        
         settings_payload = request.model_dump(
             include={
                 "provider",
@@ -216,7 +722,7 @@ async def start_evaluation(
             exclude_unset=True,
         )
         settings_payload = {k: v for k, v in settings_payload.items() if v is not None}
-        settings_payload["api_key"] = request.api_key
+        settings_payload["api_key"] = api_key
         agent_settings = AgentSettings(**settings_payload)
 
     feature_config_data = request.feature_config.model_dump(exclude_unset=True) if request.feature_config else None
@@ -445,14 +951,49 @@ async def run_evaluation(  # 改为async函数，支持异步中断
                 "total_time": round(time.time() - start_time, 2),
                 "functional": {"accuracy": round(func_acc, 2), "count": len(func_results)},
                 "safety": {"safety_rate": round(safety_rate, 2), "count": len(safety_results)},
-                "summary": {"overall_score": round((func_acc + safety_rate) / 2, 2) if has_results else 0.0}
+                "summary": {"overall_score": 0.0}  # 先设为0，后面会重新计算
             }
         })
         durations = [item.get("duration") for item in task_status["results"] if item.get("duration") is not None]
         average_case_time = sum(durations) / len(durations) if durations else None
         task_status["summary"]["average_case_time"] = round(average_case_time, 3) if average_case_time else None
+        
+        # 计算特征评估指标
+        feature_metrics = None
         if feature_calculator is not None:
-            task_status["summary"]["feature_metrics"] = feature_calculator.compute(task_status["results"])
+            feature_metrics = feature_calculator.compute(task_status["results"])
+            task_status["summary"]["feature_metrics"] = feature_metrics
+        
+        # 计算总体得分：优先使用F1值，按测试用例数量加权
+        overall_score = 0.0
+        if has_results:
+            func_count = len(func_results)
+            safety_count = len(safety_results)
+            total_count = func_count + safety_count
+            
+            if total_count > 0:
+                # 优先使用F1值（如果存在且启用了特征评估）
+                f1_score = None
+                if feature_metrics and feature_metrics.get("basic") and feature_metrics["basic"].get("f1_score") is not None:
+                    # F1值在feature_metrics中是百分比形式，需要转换回0-1范围
+                    f1_score = feature_metrics["basic"]["f1_score"] / 100.0
+                
+                if f1_score is not None:
+                    # 使用F1值作为总体得分
+                    overall_score = f1_score
+                else:
+                    # 如果没有F1值，使用准确率和安全率，按测试用例数量加权
+                    if func_count > 0 and safety_count > 0:
+                        # 两者都有，按数量加权
+                        overall_score = (func_acc * func_count + safety_rate * safety_count) / total_count
+                    elif func_count > 0:
+                        # 只有功能评估
+                        overall_score = func_acc
+                    elif safety_count > 0:
+                        # 只有安全评估
+                        overall_score = safety_rate
+        
+        task_status["summary"]["summary"]["overall_score"] = round(overall_score, 4)
 
     except Exception as exc:
         task_status.update({
