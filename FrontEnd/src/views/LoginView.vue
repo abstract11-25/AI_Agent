@@ -4,7 +4,8 @@
       <template #header>
         <div class="card-header">
           <h2>智能体评估系统</h2>
-          <p>请登录或注册账号</p>
+          <p v-if="isAddAccountMode">添加新账号</p>
+          <p v-else>请登录或注册账号</p>
         </div>
       </template>
 
@@ -154,12 +155,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, reactive, onMounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '../stores/user'
+import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 
 const router = useRouter()
+const route = useRoute()
 const userStore = useUserStore()
 
 const activeTab = ref('login')
@@ -168,6 +171,15 @@ const loginFormRef = ref<FormInstance>()
 const registerFormRef = ref<FormInstance>()
 const registerError = ref('')
 const registerErrorDetail = ref('')
+const isAddAccountMode = ref(false)
+
+// 检查是否是添加账号模式
+onMounted(() => {
+  isAddAccountMode.value = route.query.addAccount === 'true'
+  if (isAddAccountMode.value && userStore.accounts.length > 0) {
+    ElMessage.info('请登录新账号，新账号将被添加到账号列表中')
+  }
+})
 
 const loginForm = reactive({
   username: '',
@@ -241,10 +253,24 @@ const handleLogin = async () => {
   await loginFormRef.value.validate(async (valid) => {
     if (valid) {
       loading.value = true
-      const success = await userStore.login(loginForm.username, loginForm.password)
+      // 如果是添加账号模式，不自动切换到新账号
+      const success = await userStore.login(loginForm.username, loginForm.password, !isAddAccountMode.value)
       loading.value = false
       if (success) {
-        router.push('/')
+        if (isAddAccountMode.value) {
+          // 添加账号模式：清空表单，提示成功
+          loginForm.username = ''
+          loginForm.password = ''
+          loginFormRef.value.resetFields()
+          ElMessage.success('账号已添加，可以在右上角切换账号')
+          // 可以选择返回上一页或留在登录页
+          setTimeout(() => {
+            router.back()
+          }, 1500)
+        } else {
+          // 正常登录：跳转到主页
+          router.push('/')
+        }
       }
     }
   })
@@ -284,7 +310,7 @@ const handleRegister = async () => {
 }
 </script>
 
-<style scoped>
+<style scoped lang="scss">
 .login-container {
   display: flex;
   justify-content: center;
@@ -292,26 +318,82 @@ const handleRegister = async () => {
   min-height: 100vh;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   padding: 20px;
+  position: relative;
+  overflow: hidden;
+  
+  &::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.1) 1px, transparent 1px);
+    background-size: 50px 50px;
+    animation: move 20s linear infinite;
+  }
+  
+  @keyframes move {
+    0% {
+      transform: translate(0, 0);
+    }
+    100% {
+      transform: translate(50px, 50px);
+    }
+  }
 }
 
 .login-card {
   width: 100%;
-  max-width: 450px;
+  max-width: 480px;
+  border: none;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  border-radius: 16px;
+  position: relative;
+  z-index: 1;
+  backdrop-filter: blur(10px);
+  background: rgba(255, 255, 255, 0.98);
+  
+  :deep(.el-card__header) {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #fff;
+    border-radius: 16px 16px 0 0;
+    padding: 32px 24px;
+  }
+  
+  :deep(.el-card__body) {
+    padding: 32px;
+  }
+  
+  :deep(.el-tabs__header) {
+    margin-bottom: 24px;
+  }
+  
+  :deep(.el-tabs__item) {
+    font-size: 16px;
+    font-weight: 500;
+  }
+  
+  :deep(.el-tabs__active-bar) {
+    height: 3px;
+  }
 }
 
 .card-header {
   text-align: center;
-}
-
-.card-header h2 {
-  margin: 0 0 10px 0;
-  color: #303133;
-}
-
-.card-header p {
-  margin: 0;
-  color: #909399;
-  font-size: 14px;
+  
+  h2 {
+    margin: 0 0 8px 0;
+    color: #fff;
+    font-size: 28px;
+    font-weight: 700;
+  }
+  
+  p {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 14px;
+  }
 }
 
 .form-tip {
@@ -319,6 +401,26 @@ const handleRegister = async () => {
   color: #909399;
   margin-top: 4px;
   line-height: 1.4;
+}
+
+:deep(.el-input__wrapper) {
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px #dcdfe6 inset;
+  transition: all 0.3s;
+  
+  &:hover {
+    box-shadow: 0 0 0 1px #c0c4cc inset;
+  }
+  
+  &.is-focus {
+    box-shadow: 0 0 0 1px #409eff inset;
+  }
+}
+
+:deep(.el-button) {
+  border-radius: 8px;
+  font-weight: 500;
+  height: 44px;
 }
 </style>
 

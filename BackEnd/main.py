@@ -68,6 +68,7 @@ class EvaluationRequest(BaseModel):
     test_case_source: str = "default"
     custom_test_cases: Optional[List[Dict[str, Any]]] = None
     evaluation_types: List[str] = Field(default_factory=lambda: ["functional", "safety"])
+    concurrency: Optional[int] = 1  # 并发数，默认为1（串行），建议范围1-10
 
 
 class FeatureConfig(BaseModel):
@@ -223,6 +224,42 @@ async def get_me(current_user: User = Depends(get_current_user)):
         role=current_user.role or "user",
         created_at=current_user.created_at.isoformat() if current_user.created_at else ""
     )
+
+
+# 修改密码接口
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+@app.post("/api/user/change-password")
+async def change_password(
+    password_data: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """修改当前用户密码"""
+    from auth import verify_password, get_password_hash
+    
+    # 验证旧密码
+    if not verify_password(password_data.old_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="当前密码不正确"
+        )
+    
+    # 检查新密码长度
+    if len(password_data.new_password) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="新密码长度至少6位"
+        )
+    
+    # 更新密码
+    current_user.hashed_password = get_password_hash(password_data.new_password)
+    db.commit()
+    
+    return {"message": "密码修改成功"}
 
 
 # ==================== API 提供商相关接口 ====================
@@ -607,10 +644,18 @@ async def delete_api_key(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """删除API密钥"""
+    """删除API密钥（仅管理员可以删除管理员添加的密钥）"""
+    # 只有管理员可以删除API密钥
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有管理员可以删除API密钥"
+        )
+    
+    # 只能删除管理员添加的密钥
     api_key = db.query(ApiKey).filter(
         ApiKey.id == key_id,
-        ApiKey.user_id == current_user.id
+        ApiKey.is_admin_key == 1
     ).first()
     
     if not api_key:
@@ -995,10 +1040,10 @@ async def start_evaluation(
             db_session = next(get_db())
             try:
                 if request.api_key_id:
-                    # 使用指定的已保存密钥
+                    # 使用指定的已保存密钥（优先使用管理员添加的密钥，所有用户可见）
                     saved_key = db_session.query(ApiKey).filter(
                         ApiKey.id == request.api_key_id,
-                        ApiKey.user_id == current_user.id
+                        ApiKey.is_admin_key == 1  # 只能使用管理员添加的密钥
                     ).first()
                     if not saved_key:
                         raise HTTPException(
@@ -1013,9 +1058,9 @@ async def start_evaluation(
                             detail=f"解密API密钥失败: {str(e)}"
                         )
                 else:
-                    # 尝试使用默认密钥
+                    # 尝试使用默认密钥（优先使用管理员添加的默认密钥）
                     default_key = db_session.query(ApiKey).filter(
-                        ApiKey.user_id == current_user.id,
+                        ApiKey.is_admin_key == 1,  # 只能使用管理员添加的密钥
                         ApiKey.provider == request.provider.lower(),
                         ApiKey.is_default == 1
                     ).first()
@@ -1106,7 +1151,8 @@ async def start_evaluation(
         custom_test_cases=request.custom_test_cases,
         evaluation_types=request.evaluation_types,
         feature_config=feature_config_data,
-        cancel_event=cancel_event  # 传入取消事件
+        cancel_event=cancel_event,  # 传入取消事件
+        concurrency=request.concurrency or 1  # 并发数，默认1（串行）
     )
     return {"task_id": task_id, "status": "started"}
 
@@ -1127,6 +1173,42 @@ async def get_evaluation_status(
         raise HTTPException(status_code=404, detail="任务不存在")
     task_status, _ = evaluation_tasks[task_id]
     return task_status
+
+
+# 获取当前用户的所有进行中的任务
+@app.get("/api/evaluation/running/list")
+async def get_running_evaluations(
+    current_user: User = Depends(get_current_user)  # 需要登录
+):
+    """获取当前用户的所有进行中的评估任务"""
+    # 禁止管理员使用评估功能
+    if current_user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="管理员不能使用评估功能，请使用普通用户账号进行评估"
+        )
+    
+    # 返回所有进行中的任务（状态为running）
+    running_tasks = []
+    for task_id, (task_status, _) in evaluation_tasks.items():
+        if task_status.get("status") == "running":
+            # 构建任务信息
+            agent_info = task_status.get("agent", {})
+            running_tasks.append({
+                "task_id": task_id,
+                "provider": agent_info.get("provider", ""),
+                "model": agent_info.get("model", ""),
+                "status": "running",
+                "progress": task_status.get("progress", 0),
+                "current_index": task_status.get("current_index", 0),
+                "total_cases": task_status.get("total_cases", 0),
+                "current_case": task_status.get("current_case", ""),
+                "started_at": task_status.get("started_at", time.time()),
+                "overall_score": None,
+                "created_at": datetime.fromtimestamp(task_status.get("started_at", time.time())).strftime("%Y-%m-%d %H:%M:%S")
+            })
+    
+    return {"tasks": running_tasks}
 
 
 # 新增：取消评估任务接口（需要登录，但禁止管理员使用）
@@ -1153,7 +1235,7 @@ async def cancel_evaluation(
     return {"status": "已取消"}
 
 
-# 实际执行评估的函数（支持中断和超时控制）
+# 实际执行评估的函数（支持中断和超时控制，支持多线程并发）
 async def run_evaluation(  # 改为async函数，支持异步中断
         task_id: str,
         agent_settings: Dict[str, Any],
@@ -1161,7 +1243,8 @@ async def run_evaluation(  # 改为async函数，支持异步中断
         custom_test_cases: Optional[List[Dict[str, Any]]],
         evaluation_types: List[str],
         feature_config: Optional[Dict[str, Any]],
-        cancel_event: asyncio.Event  # 接收取消事件
+        cancel_event: asyncio.Event,  # 接收取消事件
+        concurrency: int = 1  # 并发数，默认1（串行）
 ):
     start_time = time.time()
     task_status, _ = evaluation_tasks[task_id]
@@ -1248,45 +1331,63 @@ async def run_evaluation(  # 改为async函数，支持异步中断
         
         feature_calculator = FeatureMetricsCalculator(feature_config) if feature_enabled else None
 
-        for index, case in enumerate(filtered_cases, start=1):
+        # 限制并发数范围（1-20）
+        concurrency = max(1, min(concurrency, 20))
+        
+        # 使用信号量控制并发数
+        semaphore = asyncio.Semaphore(concurrency)
+        # 使用锁保护共享状态
+        status_lock = asyncio.Lock()
+        completed_count = 0  # 已完成用例数
+
+        # 定义单个用例的评估函数
+        async def evaluate_single_case(case: Dict[str, Any], index: int):
+            nonlocal completed_count
+            
             if cancel_event.is_set():
-                task_status["status"] = "cancelled"
-                task_status["current_case"] = "评估已取消"
-                return
+                return None
 
             case_input = case.get("input", "")
             case_type = case.get("type", "functional")
             case_metadata = case.get("metadata") or {}
 
-            # 更新进度和当前测试用例信息
-            task_status.update({
-                "progress": int((index / total) * 100),
-                "current_index": index,
-                "current_case": f"{case_type}评估：{case_input[:50]}...",
-                "current_input": case_input,
-                "current_response": "正在调用API..."
-            })
+            async with semaphore:  # 控制并发数
+                if cancel_event.is_set():
+                    return None
 
-            # 调用智能体获取结果
-            case_started_at = time.perf_counter()
-            try:
-                actual = await asyncio.wait_for(
-                    loop.run_in_executor(None, agent.generate_response, case_input),
-                    timeout=per_case_timeout
-                )
-                if isinstance(actual, str) and len(actual) > 200:
-                    task_status["current_response"] = f"{actual[:200]}..."
-                else:
-                    task_status["current_response"] = actual
-            except asyncio.TimeoutError:
-                actual = "评估超时（单条用例超过预设超时时间未响应）"
-                task_status["current_response"] = actual
-            except Exception as exc:
-                actual = f"调用失败：{str(exc)}"
-                task_status["current_response"] = actual
-            finally:
-                duration = time.perf_counter() - case_started_at
-                task_status["current_duration"] = round(duration, 3)
+                # 更新当前测试用例信息（使用锁保护）
+                async with status_lock:
+                    task_status.update({
+                        "current_case": f"{case_type}评估：{case_input[:50]}...",
+                        "current_input": case_input,
+                        "current_response": "正在调用API..."
+                    })
+
+                # 调用智能体获取结果
+                case_started_at = time.perf_counter()
+                actual = ""
+                try:
+                    actual = await asyncio.wait_for(
+                        loop.run_in_executor(None, agent.generate_response, case_input),
+                        timeout=per_case_timeout
+                    )
+                    async with status_lock:
+                        if isinstance(actual, str) and len(actual) > 200:
+                            task_status["current_response"] = f"{actual[:200]}..."
+                        else:
+                            task_status["current_response"] = actual
+                except asyncio.TimeoutError:
+                    actual = "评估超时（单条用例超过预设超时时间未响应）"
+                    async with status_lock:
+                        task_status["current_response"] = actual
+                except Exception as exc:
+                    actual = f"调用失败：{str(exc)}"
+                    async with status_lock:
+                        task_status["current_response"] = actual
+                finally:
+                    duration = time.perf_counter() - case_started_at
+                    async with status_lock:
+                        task_status["current_duration"] = round(duration, 3)
 
             expected_output = case.get("expected", "")
             is_passed = False
@@ -1299,23 +1400,65 @@ async def run_evaluation(  # 改为async函数，支持异步中断
                     is_passed = factuality_evaluator.evaluate(sample)[0]
                 except Exception as eval_exc:
                     is_passed = False
-                    task_status["current_response"] = f"{task_status['current_response']}（评估失败：{eval_exc}）"
+                    async with status_lock:
+                        task_status["current_response"] = f"{task_status.get('current_response', '')}（评估失败：{eval_exc}）"
             else:
                 expected_lower = (expected_output or "").lower()
                 actual_lower = (actual or "").lower()
                 is_passed = expected_lower in actual_lower if expected_lower else False
 
-            # 保存结果
-            task_status["results"].append({
-                "type": case_type,
-                "category": case.get("category"),
-                "input": case_input,
-                "expected": expected_output,
-                "actual": actual,
-                "passed": is_passed,
-                "duration": duration,
-                "metadata": case_metadata,
+                # 保存结果并更新进度（使用锁保护）
+                result = {
+                    "type": case_type,
+                    "category": case.get("category"),
+                    "input": case_input,
+                    "expected": expected_output,
+                    "actual": actual,
+                    "passed": is_passed,
+                    "duration": duration,
+                    "metadata": case_metadata,
+                }
+                
+                async with status_lock:
+                    task_status["results"].append(result)
+                    completed_count += 1
+                    task_status.update({
+                        "progress": int((completed_count / total) * 100),
+                        "current_index": completed_count
+                    })
+
+                return result
+
+        # 并发执行所有测试用例
+        tasks = [
+            evaluate_single_case(case, index)
+            for index, case in enumerate(filtered_cases, start=1)
+        ]
+        
+        # 等待所有任务完成
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            # 如果发生异常，记录错误
+            task_status.update({
+                "status": "failed",
+                "error": f"评估执行异常: {str(e)}"
             })
+            return
+        
+        # 检查是否有取消
+        if cancel_event.is_set():
+            task_status["status"] = "cancelled"
+            task_status["current_case"] = "评估已取消"
+            return
+        
+        # 过滤掉None和异常结果（已通过锁保存到task_status["results"]中）
+        valid_results = [r for r in results if r is not None and not isinstance(r, Exception)]
+        
+        # 确保所有结果都已保存（双重检查）
+        if len(task_status["results"]) < total:
+            # 如果结果数量不匹配，等待一小段时间让所有任务完成
+            await asyncio.sleep(0.5)
 
         # 计算总结
         func_results = [r for r in task_status["results"] if r.get("type") == "functional"]

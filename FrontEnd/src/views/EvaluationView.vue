@@ -1,30 +1,20 @@
 <template>
-  <div class="app-container">
-    <!-- 页面标题和用户信息 -->
-    <div class="header-section glass">
-      <div class="header-title">
-        <h1>智能体评估工作台</h1>
-        <p>配置评估参数、实时观察执行状态并查看多维度特征指标</p>
+  <div class="evaluation-container">
+    <!-- 页面标题 -->
+    <el-card class="welcome-card" shadow="hover">
+      <div class="welcome-content">
+        <div class="welcome-text">
+          <h1>智能体评估工作台</h1>
+          <p>配置评估参数、实时观察执行状态并查看多维度特征指标</p>
+        </div>
+        <div class="welcome-icon">
+          <el-icon :size="60" color="#409eff"><DataBoard /></el-icon>
+        </div>
       </div>
-      <el-dropdown @command="handleCommand" class="user-info">
-          <span class="user-dropdown">
-            <el-icon><User /></el-icon>
-            <span>{{ userStore.user?.username || '用户' }}</span>
-            <el-icon><ArrowDown /></el-icon>
-          </span>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item disabled>
-                <span style="color: #909399;">{{ userStore.user?.email }}</span>
-              </el-dropdown-item>
-              <el-dropdown-item divided command="logout">退出登录</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-    </div>
+    </el-card>
 
     <!-- 主内容区 -->
-    <el-row :gutter="24" style="margin-top: 20px;">
+    <el-row :gutter="24" style="margin-top: 24px;">
       <!-- 左侧：评估配置 -->
       <el-col :span="8">
         <el-card class="panel-card config-card glass">
@@ -186,6 +176,17 @@
                         :max="5"
                         controls-position="right"
                       />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="12">
+                    <el-form-item label="并发数">
+                      <el-input-number
+                        v-model="form.concurrency"
+                        :min="1"
+                        :max="20"
+                        controls-position="right"
+                      />
+                      <div class="text-help">同时执行的测试用例数量，建议1-10</div>
                     </el-form-item>
                   </el-col>
                 </el-row>
@@ -763,7 +764,7 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { User, ArrowDown, InfoFilled } from '@element-plus/icons-vue'
+import { InfoFilled, DataBoard } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import { useUserStore } from '../stores/user'
 
@@ -780,6 +781,7 @@ interface FormData {
   maxTokens: number
   timeout: number
   maxRetries: number
+  concurrency: number
   extraHeaders: string
   extraBody: string
   featureMetricsEnabled: boolean
@@ -968,6 +970,7 @@ const form: FormData = reactive({
   maxTokens: 512,
   timeout: 60,
   maxRetries: 2,
+  concurrency: 1,
   extraHeaders: '',
   extraBody: '',
   featureMetricsEnabled: true,
@@ -1217,7 +1220,8 @@ const startEvaluation = async () => {
 
   const payload: Record<string, any> = {
     test_case_source: form.testCaseSource,
-    evaluation_types: form.evaluationTypes
+    evaluation_types: form.evaluationTypes,
+    concurrency: form.concurrency || 1
   }
 
   // 根据后端逻辑：如果使用api_key_id，不发送agent对象，而是在顶层发送参数
@@ -1288,6 +1292,8 @@ const startEvaluation = async () => {
     // 调用后端启动评估接口
     const response = await request.post('/api/evaluate', payload)
     taskId.value = response.data.task_id  // 保存任务ID
+    // 保存到sessionStorage，以便切换页面后能恢复
+    sessionStorage.setItem('current_task_id', taskId.value)
     // 从form中获取agent信息（无论使用哪种方式）
     agentInfo.value = {
       provider: form.provider,
@@ -1325,18 +1331,31 @@ const startEvaluation = async () => {
         // 处理所有可能的状态：完成、失败、取消
         if (taskStatus.status === 'completed') {
           clearInterval(pollInterval!)
+          pollInterval = null
           evaluationSummary.value = taskStatus.summary
           isEvaluating.value = false
           ElMessage.success('评估完成！')
           activeTab.value = 'results'
+          // 保存评估历史记录
+          saveEvaluationHistory(taskStatus)
+          // 清除sessionStorage
+          sessionStorage.removeItem('current_task_id')
         } else if (taskStatus.status === 'failed') {
           clearInterval(pollInterval!)
+          pollInterval = null
           ElMessage.error(`评估失败：${taskStatus.error}`)
           isEvaluating.value = false
+          // 保存失败的评估记录
+          saveEvaluationHistory(taskStatus)
+          // 清除sessionStorage
+          sessionStorage.removeItem('current_task_id')
         } else if (taskStatus.status === 'cancelled') {  // 新增：处理取消状态
           clearInterval(pollInterval!)
+          pollInterval = null
           ElMessage.info('评估已取消')
           isEvaluating.value = false
+          // 清除sessionStorage
+          sessionStorage.removeItem('current_task_id')
         }
       } catch (error: any) {
         clearInterval(pollInterval!)
@@ -1366,17 +1385,56 @@ const cancelEvaluation = async () => {
     }
     isEvaluating.value = false
     currentTestCase.value = '评估已取消'
+    // 清除sessionStorage
+    sessionStorage.removeItem('current_task_id')
     ElMessage.success('评估已成功取消')
   } catch (error: any) {
     ElMessage.error('取消评估失败：' + (error.response?.data?.detail || error.message))
   }
 }
 
-// 处理用户下拉菜单命令
-const handleCommand = (command: string) => {
-  if (command === 'logout') {
-    userStore.logout()
-    router.push('/login')
+// 保存评估历史记录
+function saveEvaluationHistory(taskStatus: any) {
+  try {
+    const historyItem = {
+      task_id: taskId.value,
+      provider: agentInfo.value?.provider || form.provider,
+      model: agentInfo.value?.model || form.model || '未指定',
+      status: taskStatus.status,
+      overall_score: taskStatus.summary?.summary?.overall_score || null,
+      summary: taskStatus.summary,
+      results: taskStatus.results || [],
+      created_at: new Date().toLocaleString('zh-CN')
+    }
+
+    // 从localStorage读取现有历史
+    const stored = localStorage.getItem('evaluation_history')
+    let history: any[] = []
+    if (stored) {
+      try {
+        history = JSON.parse(stored)
+      } catch (e) {
+        history = []
+      }
+    }
+
+    // 检查是否已存在相同task_id的记录，如果存在则更新，否则添加
+    const existingIndex = history.findIndex((item: any) => item.task_id === taskId.value)
+    if (existingIndex >= 0) {
+      history[existingIndex] = historyItem
+    } else {
+      history.unshift(historyItem) // 新记录添加到最前面
+    }
+
+    // 限制历史记录数量（最多保存100条）
+    if (history.length > 100) {
+      history = history.slice(0, 100)
+    }
+
+    // 保存回localStorage
+    localStorage.setItem('evaluation_history', JSON.stringify(history))
+  } catch (error) {
+    console.error('保存评估历史失败:', error)
   }
 }
 
@@ -1544,6 +1602,119 @@ const formatDateTime = (dateStr: string) => {
   }
 }
 
+// 恢复进行中的任务
+async function restoreRunningTask(savedTaskId: string) {
+  try {
+    const statusResponse = await request.get(`/api/evaluation/${savedTaskId}`)
+    const taskStatus = statusResponse.data
+    
+    if (taskStatus.status === 'running') {
+      // 恢复任务状态
+      taskId.value = savedTaskId
+      isEvaluating.value = true
+      progress.value = taskStatus.progress || 0
+      currentTestCase.value = taskStatus.current_case || ''
+      currentInput.value = taskStatus.current_input || ''
+      currentResponse.value = taskStatus.current_response || ''
+      currentIndex.value = taskStatus.current_index || 0
+      totalCases.value = taskStatus.total_cases || 0
+      evaluationResults.value = taskStatus.results || []
+      
+      if (taskStatus.agent) {
+        agentInfo.value = taskStatus.agent
+      }
+      
+      if (taskStatus.feature_config) {
+        taskFeatureConfig.value = taskStatus.feature_config
+      }
+      
+      activeTab.value = 'progress'
+      
+      // 恢复轮询
+      if (pollInterval) {
+        clearInterval(pollInterval)
+      }
+      
+      pollInterval = setInterval(async () => {
+        if (!taskId.value) {
+          if (pollInterval) {
+            clearInterval(pollInterval)
+            pollInterval = null
+          }
+          return
+        }
+
+        try {
+          const statusResponse = await request.get(`/api/evaluation/${taskId.value}`)
+          const taskStatus = statusResponse.data
+
+          // 更新进度和结果
+          progress.value = taskStatus.progress
+          currentTestCase.value = taskStatus.current_case || ''
+          currentInput.value = taskStatus.current_input || ''
+          currentResponse.value = taskStatus.current_response || ''
+          currentIndex.value = taskStatus.current_index || 0
+          totalCases.value = taskStatus.total_cases || 0
+          evaluationResults.value = taskStatus.results || []
+          if (taskStatus.agent) {
+            agentInfo.value = taskStatus.agent
+          }
+          if (taskStatus.feature_config) {
+            taskFeatureConfig.value = taskStatus.feature_config
+          }
+
+          // 处理所有可能的状态：完成、失败、取消
+          if (taskStatus.status === 'completed') {
+            if (pollInterval) {
+              clearInterval(pollInterval)
+              pollInterval = null
+            }
+            evaluationSummary.value = taskStatus.summary
+            isEvaluating.value = false
+            ElMessage.success('评估完成！')
+            activeTab.value = 'results'
+            saveEvaluationHistory(taskStatus)
+            sessionStorage.removeItem('current_task_id')
+          } else if (taskStatus.status === 'failed') {
+            if (pollInterval) {
+              clearInterval(pollInterval)
+              pollInterval = null
+            }
+            ElMessage.error(`评估失败：${taskStatus.error}`)
+            isEvaluating.value = false
+            saveEvaluationHistory(taskStatus)
+            sessionStorage.removeItem('current_task_id')
+          } else if (taskStatus.status === 'cancelled') {
+            if (pollInterval) {
+              clearInterval(pollInterval)
+              pollInterval = null
+            }
+            ElMessage.info('评估已取消')
+            isEvaluating.value = false
+            sessionStorage.removeItem('current_task_id')
+          }
+        } catch (error: any) {
+          if (pollInterval) {
+            clearInterval(pollInterval)
+            pollInterval = null
+          }
+          ElMessage.error('获取评估状态失败：' + error.message)
+          isEvaluating.value = false
+          sessionStorage.removeItem('current_task_id')
+        }
+      }, 1000)
+      
+      ElMessage.info('已恢复进行中的评估任务')
+    } else {
+      // 任务已完成或失败，清除sessionStorage
+      sessionStorage.removeItem('current_task_id')
+    }
+  } catch (error: any) {
+    console.warn('恢复任务失败:', error)
+    sessionStorage.removeItem('current_task_id')
+  }
+}
+
 // 组件挂载时获取用户信息和加载密钥列表
 onMounted(async () => {
   if (userStore.isLoggedIn && !userStore.user) {
@@ -1551,81 +1722,87 @@ onMounted(async () => {
   }
   // 加载当前服务商的密钥列表
   await loadApiKeys()
+  
+  // 检查是否有需要恢复的任务
+  const savedTaskId = sessionStorage.getItem('current_task_id')
+  if (savedTaskId) {
+    await restoreRunningTask(savedTaskId)
+  }
 })
 </script>
 
-<style scoped>
-.app-container {
-  padding: 24px;
-  min-height: 100vh;
-  background: radial-gradient(circle at top, rgba(64, 158, 255, 0.08), transparent 55%), #f4f6fb;
+<style scoped lang="scss">
+.evaluation-container {
+  max-width: 1600px;
+  margin: 0 auto;
 }
 
-.header-section {
+.welcome-card {
+  margin-bottom: 24px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: none;
+  
+  :deep(.el-card__body) {
+    padding: 32px;
+  }
+}
+
+.welcome-content {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 24px 28px;
-  margin-bottom: 24px;
-  border-radius: 16px;
-  box-shadow: 0 10px 30px rgba(64, 158, 255, 0.18);
-  backdrop-filter: blur(12px);
-  background: linear-gradient(135deg, rgba(64, 158, 255, 0.2), rgba(255, 255, 255, 0.82));
-  border: 1px solid rgba(255, 255, 255, 0.6);
-}
-
-.header-title h1 {
-  margin: 0;
-  font-size: 26px;
-  font-weight: 600;
-  color: #1f2d3d;
-}
-
-.header-title p {
-  margin: 6px 0 0;
-  color: #5c6c83;
-  font-size: 14px;
-}
-
-.user-info {
-  display: flex;
-  align-items: center;
-}
-
-.user-dropdown {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  padding: 10px 18px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.7);
-  color: #1f2d3d;
-  font-weight: 500;
-  box-shadow: 0 8px 20px rgba(30, 73, 128, 0.16);
-  transition: all 0.25s;
-}
-
-.user-dropdown:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 12px 28px rgba(30, 73, 128, 0.22);
+  color: #fff;
+  
+  .welcome-text {
+    flex: 1;
+    
+    h1 {
+      font-size: 28px;
+      margin: 0 0 12px 0;
+      font-weight: 600;
+      color: #fff;
+    }
+    
+    p {
+      font-size: 16px;
+      opacity: 0.9;
+      margin: 0;
+      color: rgba(255, 255, 255, 0.9);
+    }
+  }
+  
+  .welcome-icon {
+    opacity: 0.3;
+  }
 }
 
 .panel-card {
-  border-radius: 18px;
+  border-radius: 12px;
   border: none;
-  box-shadow: 0 20px 50px rgba(15, 38, 67, 0.12);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
   overflow: hidden;
+  transition: all 0.3s;
+  
+  &:hover {
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  }
 }
 
 .panel-card :deep(.el-card__header) {
-  background: rgba(64, 158, 255, 0.06);
-  border-bottom: 1px solid rgba(64, 158, 255, 0.15);
+  background: #f5f7fa;
+  border-bottom: 1px solid #ebeef5;
+  padding: 16px 20px;
+  font-weight: 600;
+  color: #303133;
 }
 
 .config-card {
   position: sticky;
   top: 24px;
+  
+  :deep(.el-card__header) {
+    background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%);
+  }
 }
 
 /* 配置区域滚动条样式 */
@@ -1666,42 +1843,44 @@ onMounted(async () => {
 
 .button-group :deep(.el-button) {
   flex: 1;
-  height: 42px;
+  height: 44px;
   font-size: 15px;
   font-weight: 500;
-  border-radius: 10px;
+  border-radius: 8px;
   transition: all 0.3s ease;
 }
 
 .button-group :deep(.el-button--primary) {
-  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.3);
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
 }
 
 .button-group :deep(.el-button--primary:hover:not(:disabled)) {
   transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(64, 158, 255, 0.4);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
 }
 
 .button-group :deep(.el-button--warning) {
-  box-shadow: 0 4px 12px rgba(255, 152, 0, 0.3);
+  box-shadow: 0 2px 8px rgba(255, 152, 0, 0.3);
 }
 
 .button-group :deep(.el-button--warning:hover:not(:disabled)) {
   transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(255, 152, 0, 0.4);
+  box-shadow: 0 4px 12px rgba(255, 152, 0, 0.4);
 }
 
-.config-header h2 {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 600;
-  color: #1f2d3d;
-}
-
-.config-header p {
-  margin: 6px 0 0;
-  color: #7a8aa0;
-  font-size: 13px;
+.config-header {
+  h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    color: #303133;
+  }
+  
+  p {
+    margin: 6px 0 0;
+    color: #909399;
+    font-size: 14px;
+  }
 }
 
 /* 表单样式 */
@@ -1734,18 +1913,18 @@ onMounted(async () => {
 }
 
 .subtle-card {
-  border-radius: 16px;
-  border: 1px solid rgba(64, 158, 255, 0.12);
-  box-shadow: 0 12px 30px rgba(64, 158, 255, 0.12);
-  background: rgba(255, 255, 255, 0.9);
+  border-radius: 12px;
+  border: 1px solid #ebeef5;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  background: #fff;
 }
 
 .progress-detail {
   margin-top: 15px;
   padding: 16px;
-  background-color: rgba(64, 158, 255, 0.08);
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.08) 0%, rgba(118, 75, 162, 0.08) 100%);
   border-radius: 12px;
-  border-left: 4px solid #409EFF;
+  border-left: 4px solid #409eff;
 }
 
 .detail-item {
@@ -1785,11 +1964,18 @@ onMounted(async () => {
 }
 
 .stat-card {
-  background: linear-gradient(135deg, rgba(64, 158, 255, 0.12), rgba(255, 255, 255, 0.9));
-  border-radius: 16px;
-  padding: 18px;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%);
+  border-radius: 12px;
+  padding: 20px;
   text-align: center;
-  box-shadow: 0 12px 28px rgba(64, 158, 255, 0.1);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  transition: all 0.3s;
+  border: 1px solid rgba(102, 126, 234, 0.2);
+  
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  }
 }
 
 .stat-label {
@@ -1829,7 +2015,7 @@ onMounted(async () => {
 
 .result-tabs :deep(.el-tabs__item.is-active) {
   font-weight: 600;
-  color: #1890ff;
+  color: #409eff;
 }
 
 .result-tabs :deep(.el-tabs__active-bar) {
@@ -1852,11 +2038,17 @@ onMounted(async () => {
 }
 
 .history-item {
-  background: rgba(255, 255, 255, 0.92);
-  border-radius: 16px;
-  padding: 14px 18px;
-  border-left: 4px solid #409EFF;
-  box-shadow: 0 8px 24px rgba(64, 158, 255, 0.1);
+  background: #fff;
+  border-radius: 12px;
+  padding: 16px 20px;
+  border-left: 4px solid #409eff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  transition: all 0.3s;
+  
+  &:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+    transform: translateX(2px);
+  }
 }
 
 .history-title {

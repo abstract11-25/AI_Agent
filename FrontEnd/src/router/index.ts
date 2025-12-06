@@ -2,7 +2,12 @@ import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
 import EvaluationView from '../views/EvaluationView.vue'
 import LoginView from '../views/LoginView.vue'
-import AdminView from '../views/AdminView.vue'
+import UserLayout from '../layouts/UserLayout.vue'
+import AdminLayout from '../layouts/AdminLayout.vue'
+import DashboardView from '../views/admin/DashboardView.vue'
+import UserManagementView from '../views/admin/UserManagementView.vue'
+import ApiKeyManagementView from '../views/admin/ApiKeyManagementView.vue'
+import EvaluationConfigView from '../views/admin/EvaluationConfigView.vue'
 import { useUserStore } from '../stores/user'
 
 // 定义路由类型
@@ -15,15 +20,60 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/',
-    name: 'evaluation',
-    component: EvaluationView,
-    meta: { requiresAuth: true, requiresUser: true }  // 需要普通用户
+    component: UserLayout,
+    meta: { requiresAuth: true, requiresUser: true },
+    children: [
+      {
+        path: '',
+        name: 'evaluation',
+        component: EvaluationView,
+        meta: { requiresAuth: true, requiresUser: true }
+      },
+      {
+        path: 'history',
+        name: 'history',
+        component: () => import('../views/user/HistoryView.vue'),
+        meta: { requiresAuth: true, requiresUser: true }
+      },
+      {
+        path: 'settings',
+        name: 'settings',
+        component: () => import('../views/user/SettingsView.vue'),
+        meta: { requiresAuth: true, requiresUser: true }
+      }
+    ]
   },
   {
     path: '/admin',
-    name: 'admin',
-    component: AdminView,
-    meta: { requiresAuth: true, requiresAdmin: true }  // 需要管理员
+    component: AdminLayout,
+    meta: { requiresAuth: true, requiresAdmin: true },
+    redirect: '/admin/dashboard',
+    children: [
+      {
+        path: 'dashboard',
+        name: 'admin-dashboard',
+        component: DashboardView,
+        meta: { requiresAuth: true, requiresAdmin: true }
+      },
+      {
+        path: 'users',
+        name: 'admin-users',
+        component: UserManagementView,
+        meta: { requiresAuth: true, requiresAdmin: true }
+      },
+      {
+        path: 'apikeys',
+        name: 'admin-apikeys',
+        component: ApiKeyManagementView,
+        meta: { requiresAuth: true, requiresAdmin: true }
+      },
+      {
+        path: 'config',
+        name: 'admin-config',
+        component: EvaluationConfigView,
+        meta: { requiresAuth: true, requiresAdmin: true }
+      }
+    ]
   }
 ]
 
@@ -47,6 +97,16 @@ router.beforeEach((to, from, next) => {
           next()
         } else {
           // 非管理员，跳转到评估页面
+          next('/')
+        }
+        return
+      }
+      
+      // 检查管理员路由的子路由
+      if (to.path.startsWith('/admin')) {
+        if (userRole === 'admin') {
+          next()
+        } else {
           next('/')
         }
         return

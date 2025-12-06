@@ -50,6 +50,55 @@
             </div>
           </el-tab-pane>
           
+          <!-- API KEY管理 -->
+          <el-tab-pane label="API KEY管理" name="apikeys">
+            <div class="tab-content">
+              <div class="toolbar">
+                <el-button type="primary" @click="handleAddApiKey">添加默认API KEY</el-button>
+                <el-button @click="loadApiKeys">刷新</el-button>
+              </div>
+              
+              <el-table :data="apiKeys" style="width: 100%" v-loading="apiKeysLoading">
+                <el-table-column prop="id" label="ID" width="80" />
+                <el-table-column prop="provider" label="提供商" width="120">
+                  <template #default="scope">
+                    <el-tag>{{ getProviderName(scope.row.provider) }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="name" label="密钥名称" />
+                <el-table-column prop="is_default" label="默认" width="100">
+                  <template #default="scope">
+                    <el-tag :type="scope.row.is_default ? 'success' : 'info'">
+                      {{ scope.row.is_default ? '是' : '否' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="created_at" label="创建时间" width="180" />
+                <el-table-column prop="updated_at" label="更新时间" width="180" />
+                <el-table-column label="操作" width="280">
+                  <template #default="scope">
+                    <el-button 
+                      size="small" 
+                      type="success"
+                      @click="handleSetDefault(scope.row)"
+                      :disabled="scope.row.is_default"
+                    >
+                      设为默认
+                    </el-button>
+                    <el-button size="small" @click="handleEditApiKey(scope.row)">编辑</el-button>
+                    <el-button 
+                      size="small" 
+                      type="danger" 
+                      @click="handleDeleteApiKey(scope.row)"
+                    >
+                      删除
+                    </el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </el-tab-pane>
+          
           <!-- 评估体系配置 -->
           <el-tab-pane label="评估体系配置" name="config">
             <div class="tab-content">
@@ -217,6 +266,49 @@
         <el-button type="primary" @click="handleSubmitUser" :loading="savingUser">确定</el-button>
       </template>
     </el-dialog>
+    
+    <!-- API KEY编辑对话框 -->
+    <el-dialog
+      v-model="apiKeyDialogVisible"
+      :title="editingApiKey ? '编辑API KEY' : '添加默认API KEY'"
+      width="600px"
+    >
+      <el-form :model="apiKeyForm" label-width="120px">
+        <el-form-item label="提供商" required>
+          <el-select v-model="apiKeyForm.provider" placeholder="请选择提供商" style="width: 100%" :disabled="!!editingApiKey">
+            <el-option
+              v-for="provider in providers"
+              :key="provider.id"
+              :label="provider.name"
+              :value="provider.id"
+            >
+              <span>{{ provider.name }}</span>
+              <span style="color: #8492a6; font-size: 13px; margin-left: 10px">{{ provider.description }}</span>
+            </el-option>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="密钥名称" required>
+          <el-input v-model="apiKeyForm.name" placeholder="请输入密钥名称（如：生产环境密钥）" />
+        </el-form-item>
+        <el-form-item label="API KEY" :required="!editingApiKey">
+          <el-input 
+            v-model="apiKeyForm.api_key" 
+            type="password" 
+            show-password 
+            placeholder="请输入API KEY"
+          />
+          <div class="form-help" v-if="editingApiKey">留空则不修改API KEY</div>
+        </el-form-item>
+        <el-form-item label="设为默认">
+          <el-switch v-model="apiKeyForm.is_default" />
+          <div class="form-help">设置为默认后，该提供商下的其他密钥将自动取消默认状态</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="apiKeyDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleSubmitApiKey" :loading="savingApiKey">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -238,12 +330,25 @@ const editingUser = ref(null)
 const savingUser = ref(false)
 const configLoading = ref(false)
 const savingConfig = ref(false)
+const apiKeys = ref([])
+const apiKeysLoading = ref(false)
+const apiKeyDialogVisible = ref(false)
+const editingApiKey = ref(null)
+const savingApiKey = ref(false)
+const providers = ref([])
 
 const userForm = ref({
   username: '',
   email: '',
   role: 'user',
   password: ''
+})
+
+const apiKeyForm = ref({
+  provider: '',
+  name: '',
+  api_key: '',
+  is_default: false
 })
 
 const evaluationConfig = ref({
@@ -457,6 +562,158 @@ function handleLogout() {
   router.push('/login')
 }
 
+// 加载API KEY列表
+async function loadApiKeys() {
+  apiKeysLoading.value = true
+  try {
+    const response = await axios.get('http://127.0.0.1:8000/api/apikeys', {
+      headers: {
+        Authorization: `Bearer ${userStore.token}`
+      }
+    })
+    apiKeys.value = response.data
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '加载API KEY列表失败')
+  } finally {
+    apiKeysLoading.value = false
+  }
+}
+
+// 加载提供商列表
+async function loadProviders() {
+  try {
+    const response = await axios.get('http://127.0.0.1:8000/api/providers')
+    providers.value = response.data.filter((p: any) => p.requires_api_key)
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '加载提供商列表失败')
+  }
+}
+
+// 获取提供商名称
+function getProviderName(providerId: string) {
+  const provider = providers.value.find((p: any) => p.id === providerId)
+  return provider ? provider.name : providerId
+}
+
+// 添加API KEY
+function handleAddApiKey() {
+  editingApiKey.value = null
+  apiKeyForm.value = {
+    provider: '',
+    name: '',
+    api_key: '',
+    is_default: false
+  }
+  apiKeyDialogVisible.value = true
+}
+
+// 编辑API KEY
+function handleEditApiKey(apiKey: any) {
+  editingApiKey.value = apiKey
+  apiKeyForm.value = {
+    provider: apiKey.provider,
+    name: apiKey.name,
+    api_key: '',
+    is_default: apiKey.is_default
+  }
+  apiKeyDialogVisible.value = true
+}
+
+// 提交API KEY
+async function handleSubmitApiKey() {
+  if (!apiKeyForm.value.provider || !apiKeyForm.value.name) {
+    ElMessage.warning('请填写提供商和密钥名称')
+    return
+  }
+  
+  if (!editingApiKey.value && !apiKeyForm.value.api_key) {
+    ElMessage.warning('请填写API KEY')
+    return
+  }
+  
+  savingApiKey.value = true
+  try {
+    if (editingApiKey.value) {
+      // 更新API KEY
+      const updateData: any = {
+        name: apiKeyForm.value.name,
+        is_default: apiKeyForm.value.is_default
+      }
+      if (apiKeyForm.value.api_key) {
+        updateData.api_key = apiKeyForm.value.api_key
+      }
+      
+      await axios.put(`http://127.0.0.1:8000/api/apikeys/${editingApiKey.value.id}`, updateData, {
+        headers: {
+          Authorization: `Bearer ${userStore.token}`
+        }
+      })
+      ElMessage.success('API KEY已更新')
+    } else {
+      // 创建API KEY
+      await axios.post('http://127.0.0.1:8000/api/apikeys', {
+        provider: apiKeyForm.value.provider,
+        name: apiKeyForm.value.name,
+        api_key: apiKeyForm.value.api_key,
+        is_default: apiKeyForm.value.is_default
+      }, {
+        headers: {
+          Authorization: `Bearer ${userStore.token}`
+        }
+      })
+      ElMessage.success('API KEY已添加')
+    }
+    apiKeyDialogVisible.value = false
+    loadApiKeys()
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '操作失败')
+  } finally {
+    savingApiKey.value = false
+  }
+}
+
+// 删除API KEY
+async function handleDeleteApiKey(apiKey: any) {
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除API KEY "${apiKey.name}" 吗？此操作不可恢复。`,
+      '确认删除',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+    
+    await axios.delete(`http://127.0.0.1:8000/api/apikeys/${apiKey.id}`, {
+      headers: {
+        Authorization: `Bearer ${userStore.token}`
+      }
+    })
+    ElMessage.success('API KEY已删除')
+    loadApiKeys()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.response?.data?.detail || '删除失败')
+    }
+  }
+}
+
+// 设置默认API KEY
+async function handleSetDefault(apiKey: any) {
+  try {
+    await axios.post(`http://127.0.0.1:8000/api/apikeys/${apiKey.id}/set-default`, {}, {
+      headers: {
+        Authorization: `Bearer ${userStore.token}`
+      }
+    })
+    ElMessage.success('已设置为默认API KEY')
+    loadApiKeys()
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '设置失败')
+  }
+}
+
 onMounted(() => {
   if (userStore.user?.role !== 'admin') {
     ElMessage.error('您没有权限访问此页面')
@@ -465,6 +722,8 @@ onMounted(() => {
   }
   loadUsers()
   loadConfig()
+  loadApiKeys()
+  loadProviders()
 })
 </script>
 
